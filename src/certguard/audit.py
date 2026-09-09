@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+import json
+import threading
+from pathlib import Path
+
+from certguard.models import AnalysisReport
+
+
+class AuditWriteError(OSError):
+    """Raised when an audit record cannot be persisted."""
+
+
+class JsonlAuditSink:
+    """Append-only local audit sink; production deployments can replace this adapter."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+
+    def append(self, report: AnalysisReport) -> None:
+        serialized = json.dumps(report.to_dict(), separators=(",", ":"), ensure_ascii=True)
+        try:
+            with self._lock:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self.path.open("a", encoding="utf-8") as stream:
+                    stream.write(serialized + "\n")
+        except OSError as exc:
+            raise AuditWriteError(f"Failed to append audit log {self.path}: {exc}") from exc

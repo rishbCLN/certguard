@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "issuers": [
+    {
+      "id": "coursera",
+      "display_name": "Coursera",
+      "aliases": ["Coursera"],
+      "verification_url_patterns": ["^https://(?:www\\.)?coursera\\.org/account/accomplishments/(?:verify|certificate)/[A-Za-z0-9_-]+/?(?:[?#].*)?$"],
+      "allowed_hosts": ["coursera.org", "www.coursera.org"],
+      "endpoints": [
+        {
+          "url_template": "https://www.coursera.org/account/accomplishments/verify/{certificate_id}",
+          "allowed_hosts": ["www.coursera.org"],
+          "success_markers": ["Accomplishments", "Verify"],
+          "failure_markers": ["Page Not Found", "doesn't exist"]
+        }
+      ],
+      "certificate_id_patterns": ["(?:verify|certificate)/([A-Za-z0-9_-]{6,64})", "(?:certificate|credential)(?: id)?[:#\\s]+([A-Za-z0-9_-]{6,64})"],
+      "language_phrases": ["has successfully completed", "an online non-credit course"]
+    },
+    {
+      "id": "nptel",
+      "display_name": "NPTEL",
+      "aliases": ["NPTEL", "National Programme on Technology Enhanced Learning", "SWAYAM"],
+      "verification_url_patterns": ["^https://(?:archive\\.)?nptel\\.ac\\.in/.+"],
+      "allowed_hosts": ["nptel.ac.in", "archive.nptel.ac.in"],
+      "endpoints": [],
+      "certificate_id_patterns": ["(?:certificate|roll|enrollment)(?: no| number| id)?[.:#\\s]+([A-Za-z0-9_-]{6,64})"],
+      "language_phrases": ["online certification", "funded by the MoE"]
+    },
+    {
+      "id": "edx",
+      "display_name": "edX",
+      "aliases": ["edX"],
+      "verification_url_patterns": ["^https://credentials\\.edx\\.org/credentials/[A-Za-z0-9_-]+/?(?:[?#].*)?$"],
+      "allowed_hosts": ["credentials.edx.org"],
+      "endpoints": [
+        {
+          "url_template": "https://credentials.edx.org/credentials/{certificate_id}/",
+          "allowed_hosts": ["credentials.edx.org"],
+          "success_markers": ["Credential", "Issued"],
+          "failure_markers": ["not found", "404"]
+        }
+      ],
+      "certificate_id_patterns": ["credentials/([A-Za-z0-9_-]{6,64})", "(?:certificate|credential)(?: id)?[:#\\s]+([A-Za-z0-9_-]{6,64})"],
+      "language_phrases": ["successfully completed and received a passing grade", "verified certificate"]
+    },
+    {
+      "id": "hackerrank",
+      "display_name": "HackerRank",
+      "aliases": ["HackerRank"],
+      "verification_url_patterns": ["^https://www\\.hackerrank\\.com/certificates/[A-Za-z0-9_-]+/?(?:[?#].*)?$"],
+      "allowed_hosts": ["www.hackerrank.com"],
+      "endpoints": [
+        {
+          "url_template": "https://www.hackerrank.com/certificates/{certificate_id}",
+          "allowed_hosts": ["www.hackerrank.com"],
+          "success_markers": ["Certificate", "HackerRank"],
+          "failure_markers": ["not found", "invalid certificate"]
+        }
+      ],
+      "certificate_id_patterns": ["certificates/([A-Za-z0-9_-]{6,64})", "certificate id[:#\\s]+([A-Za-z0-9_-]{6,64})"],
+      "language_phrases": ["has successfully cleared the assessment", "HackerRank Skills Certification Test"]
+    },
+    {
+      "id": "unstop",
+      "display_name": "Unstop",
+      "aliases": ["Unstop", "Dare2Compete"],
+      "verification_url_patterns": ["^https://unstop\\.com/certificate-preview/[A-Za-z0-9_-]+/?(?:[?#].*)?$"],
+      "allowed_hosts": ["unstop.com"],
+      "endpoints": [
+        {
+          "url_template": "https://unstop.com/certificate-preview/{certificate_id}",
+          "allowed_hosts": ["unstop.com"],
+          "success_markers": ["Certificate", "Unstop"],
+          "failure_markers": ["not found", "invalid"]
+        }
+      ],
+      "certificate_id_patterns": ["certificate-preview/([A-Za-z0-9_-]{6,64})", "certificate id[:#\\s]+([A-Za-z0-9_-]{6,64})"],
+      "language_phrases": ["certificate of participation", "participated in"]
+    },
+    {
+      "id": "devfolio",
+      "display_name": "Devfolio",
+      "aliases": ["Devfolio"],
+      "verification_url_patterns": ["^https://.+\\.devfolio\\.co/.+"],
+      "allowed_hosts": ["devfolio.co"],
+      "endpoints": [],
+      "certificate_id_patterns": ["certificate id[:#\\s]+([A-Za-z0-9_-]{6,64})"],
+      "language_phrases": ["certificate of participation", "hackathon"]
+    }
+  ]
+}

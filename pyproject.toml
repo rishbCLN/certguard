@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "certguard"
+version = "0.1.0"
+description = "Human-in-the-loop certificate fraud triage pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "numpy==2.2.4",
+  "opencv-python-headless==4.11.0.86",
+  "Pillow==11.1.0",
+  "PyMuPDF==1.25.4",
+  "pytesseract==0.3.13",
+  "scikit-image==0.25.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.5",
+  "ruff==0.11.2",
+]
+
+[project.scripts]
+certguard = "certguard.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/certguard"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/certguard/data" = "certguard/data"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

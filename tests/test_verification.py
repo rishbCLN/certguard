@@ -1,0 +1,144 @@
+from urllib.error import URLError
+
+from certguard.models import ExtractionResult, SubmissionClaims, VerificationStatus
+from certguard.registry import IssuerRegistry
+from certguard.verification import LookupResponse, VerificationService, _host_allowed
+
+
+class StubClient:
+    def __init__(self, body: str, status_code: int = 200) -> None:
+        self.body = body
+        self.status_code = status_code
+
+    def get(self, url: str, allowed_hosts: set[str], timeout: float) -> LookupResponse:
+        assert url.startswith("https://")
+        assert allowed_hosts
+        assert timeout > 0
+        return LookupResponse(self.status_code, url, self.body)
+
+
+class FailingClient:
+    def get(self, url: str, allowed_hosts: set[str], timeout: float) -> LookupResponse:
+        raise URLError("issuer unavailable")
+
+
+def registry_with_claims() -> IssuerRegistry:
+    return IssuerRegistry.from_data(
+        {
+            "issuers": [
+                {
+                    "id": "example",
+                    "display_name": "Example",
+                    "aliases": ["Example"],
+                    "verification_url_patterns": [
+                        "^https://verify\\.example\\.org/c/[A-Za-z0-9]+$"
+                    ],
+                    "allowed_hosts": ["verify.example.org"],
+                    "certificate_id_patterns": ["/c/([A-Za-z0-9]+)"],
+                    "endpoints": [
+                        {
+                            "url_template": "https://verify.example.org/c/{certificate_id}",
+                            "allowed_hosts": ["verify.example.org"],
+                            "success_markers": ["Credential valid"],
+                            "failure_markers": ["Credential not found"],
+                            "recipient_patterns": ["Recipient: ([A-Za-z ]+) Credential:"],
+                            "credential_patterns": ["Credential: ([A-Za-z ]+)$"],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+
+def test_record_without_claim_binding_is_not_fully_verified() -> None:
+    service = VerificationService(
+        IssuerRegistry.default(), client=StubClient("HackerRank Certificate")
+    )
+    extraction = ExtractionResult(
+        text="HackerRank certificate",
+        urls=["https://www.hackerrank.com/certificates/abc123def"],
+    )
+
+    result = service.verify(extraction)
+
+    assert result.status == VerificationStatus.RECORD_FOUND
+    assert result.issuer_id == "hackerrank"
+
+
+def test_recognized_issuer_without_code_is_not_failed_lookup() -> None:
+    service = VerificationService(IssuerRegistry.default(), network_enabled=False)
+
+    result = service.verify(ExtractionResult(text="Awarded by Coursera"))
+
+    assert result.status == VerificationStatus.NO_CODE_PRESENT
+
+
+def test_unrecognized_issuer_is_reported_separately() -> None:
+    service = VerificationService(IssuerRegistry.default(), network_enabled=False)
+
+    result = service.verify(ExtractionResult(text="Example Training Company"))
+
+    assert result.status == VerificationStatus.UNRECOGNIZED_ISSUER
+
+
+def test_generic_success_page_does_not_verify() -> None:
+    service = VerificationService(IssuerRegistry.default(), client=StubClient("HackerRank"))
+
+    result = service.verify(
+        ExtractionResult(
+            text="HackerRank certificate",
+            urls=["https://www.hackerrank.com/certificates/abc123def"],
+        )
+    )
+
+    assert result.status == VerificationStatus.LOOKUP_INCONCLUSIVE
+
+
+def test_authoritative_claim_mismatch_is_adverse() -> None:
+    body = "Credential valid Recipient: Alice Example Credential: Python Basics"
+    service = VerificationService(registry_with_claims(), client=StubClient(body))
+
+    result = service.verify(
+        ExtractionResult(
+            text="Example",
+            urls=["https://verify.example.org/c/ABC123"],
+        ),
+        SubmissionClaims(recipient="Mallory Example", credential_title="Python Basics"),
+    )
+
+    assert result.status == VerificationStatus.CLAIMS_MISMATCH
+    assert result.claim_comparisons["recipient"] == "mismatch"
+
+
+def test_authoritative_claim_match_verifies() -> None:
+    body = "Credential valid Recipient: Alice Example Credential: Python Basics"
+    service = VerificationService(registry_with_claims(), client=StubClient(body))
+
+    result = service.verify(
+        ExtractionResult(
+            text="Example",
+            urls=["https://verify.example.org/c/ABC123"],
+        ),
+        SubmissionClaims(recipient="Alice Example", credential_title="Python Basics"),
+    )
+
+    assert result.status == VerificationStatus.VERIFIED
+
+
+def test_network_failure_is_non_adverse() -> None:
+    service = VerificationService(IssuerRegistry.default(), client=FailingClient())
+
+    result = service.verify(
+        ExtractionResult(
+            text="HackerRank",
+            urls=["https://www.hackerrank.com/certificates/abc123def"],
+        )
+    )
+
+    assert result.status == VerificationStatus.LOOKUP_UNAVAILABLE
+
+
+def test_host_allowlist_does_not_implicitly_allow_subdomains() -> None:
+    assert _host_allowed("verify.example.org", {"verify.example.org"})
+    assert not _host_allowed("attacker.verify.example.org", {"verify.example.org"})
