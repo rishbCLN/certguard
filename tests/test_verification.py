@@ -1,4 +1,5 @@
-from urllib.error import URLError
+import io
+from urllib.error import HTTPError, URLError
 
 from certguard.models import ExtractionResult, SubmissionClaims, VerificationStatus
 from certguard.registry import IssuerRegistry
@@ -20,6 +21,15 @@ class StubClient:
 class FailingClient:
     def get(self, url: str, allowed_hosts: set[str], timeout: float) -> LookupResponse:
         raise URLError("issuer unavailable")
+
+
+class HttpErrorClient:
+    def __init__(self, code: int, body: str) -> None:
+        self.code = code
+        self.body = body
+
+    def get(self, url: str, allowed_hosts: set[str], timeout: float) -> LookupResponse:
+        raise HTTPError(url, self.code, "error", None, io.BytesIO(self.body.encode()))
 
 
 def registry_with_claims() -> IssuerRegistry:
@@ -48,6 +58,13 @@ def registry_with_claims() -> IssuerRegistry:
                 }
             ]
         }
+    )
+
+
+def extraction_for_example() -> ExtractionResult:
+    return ExtractionResult(
+        text="Example",
+        urls=["https://verify.example.org/c/ABC123"],
     )
 
 
@@ -124,6 +141,55 @@ def test_authoritative_claim_match_verifies() -> None:
     )
 
     assert result.status == VerificationStatus.VERIFIED
+
+
+def test_partially_exposed_claims_do_not_verify() -> None:
+    # The page exposes only the recipient, so the supplied trusted credential
+    # title is never checked; the record must not become fully verified.
+    body = "Credential valid Recipient: Alice Example Credential:"
+    service = VerificationService(registry_with_claims(), client=StubClient(body))
+
+    result = service.verify(
+        extraction_for_example(),
+        SubmissionClaims(recipient="Alice Example", credential_title="Python Basics"),
+    )
+
+    assert result.status == VerificationStatus.LOOKUP_INCONCLUSIVE
+    assert result.claim_comparisons == {"recipient": "match"}
+
+
+def test_http_error_with_failure_markers_is_authoritative_negative() -> None:
+    service = VerificationService(
+        registry_with_claims(),
+        client=HttpErrorClient(404, "<html>Credential not found</html>"),
+    )
+
+    result = service.verify(extraction_for_example())
+
+    assert result.status == VerificationStatus.FAILED_LOOKUP
+    assert result.attempts[0]["outcome"] == "authoritative-negative"
+
+
+def test_http_server_error_remains_operationally_unavailable() -> None:
+    service = VerificationService(
+        registry_with_claims(),
+        client=HttpErrorClient(503, "temporarily unavailable"),
+    )
+
+    result = service.verify(extraction_for_example())
+
+    assert result.status == VerificationStatus.LOOKUP_UNAVAILABLE
+
+
+def test_http_not_found_without_failure_markers_is_inconclusive() -> None:
+    service = VerificationService(
+        registry_with_claims(),
+        client=HttpErrorClient(404, "some unknown error page"),
+    )
+
+    result = service.verify(extraction_for_example())
+
+    assert result.status == VerificationStatus.LOOKUP_UNAVAILABLE
 
 
 def test_network_failure_is_non_adverse() -> None:

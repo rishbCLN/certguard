@@ -74,6 +74,13 @@ class LookupClient:
             return LookupResponse(response.status, response.url, body)
 
 
+def _read_http_error_body(exc: HTTPError) -> str:
+    try:
+        return exc.read(1_000_000).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return ""
+
+
 class VerificationService:
     def __init__(
         self,
@@ -171,37 +178,29 @@ class VerificationService:
                 if verified:
                     authoritative = self._extract_authoritative_claims(response.body, endpoint)
                     comparisons = self._compare_claims(submission_claims, authoritative)
-                    if any(value == "mismatch" for value in comparisons.values()):
-                        return VerificationResult(
-                            status=VerificationStatus.CLAIMS_MISMATCH,
-                            issuer_id=issuer.issuer_id,
-                            issuer_name=issuer.display_name,
-                            explanation="The issuer record exists, but its identity or credential claims conflict with the submitted certificate.",
-                            attempts=attempts,
-                            authoritative_claims=authoritative,
-                            claim_comparisons=comparisons,
-                        )
-                    status = (
-                        VerificationStatus.VERIFIED
-                        if comparisons and all(value == "match" for value in comparisons.values())
-                        else VerificationStatus.RECORD_FOUND
-                    )
-                    return VerificationResult(
-                        status=status,
-                        issuer_id=issuer.issuer_id,
-                        issuer_name=issuer.display_name,
-                        explanation=(
-                            "The issuer record was found and its available claims matched the submitted certificate."
-                            if status == VerificationStatus.VERIFIED
-                            else "The issuer record was found, but there was not enough structured claim data to bind it to the submitted certificate."
-                        ),
-                        attempts=attempts,
-                        authoritative_claims=authoritative,
-                        claim_comparisons=comparisons,
+                    return self._claim_bound_result(
+                        issuer, attempts, authoritative, comparisons, submission_claims
                     )
             except HTTPError as exc:
-                saw_operational_error = True
-                attempts.append({"url": url, "status_code": exc.code, "outcome": "http-error"})
+                body = _read_http_error_body(exc)
+                body_folded = body.casefold()
+                authoritative_negative = bool(endpoint.failure_markers) and all(
+                    marker.casefold() in body_folded for marker in endpoint.failure_markers
+                )
+                if authoritative_negative and 400 <= exc.code < 500:
+                    saw_authoritative_negative = True
+                    attempts.append(
+                        {
+                            "url": url,
+                            "status_code": exc.code,
+                            "outcome": "authoritative-negative",
+                        }
+                    )
+                else:
+                    saw_operational_error = True
+                    attempts.append(
+                        {"url": url, "status_code": exc.code, "outcome": "http-error"}
+                    )
             except (URLError, TimeoutError, ValueError, UnsafeRedirectError, OSError) as exc:
                 saw_operational_error = True
                 attempts.append(
@@ -224,6 +223,61 @@ class VerificationService:
                 else "The issuer lookup could not produce a conclusive authenticity result."
             ),
             attempts=attempts,
+        )
+
+    @staticmethod
+    def _claim_bound_result(
+        issuer: IssuerDefinition,
+        attempts: list[dict[str, object]],
+        authoritative: dict[str, str],
+        comparisons: dict[str, str],
+        submission_claims: SubmissionClaims | None,
+    ) -> VerificationResult:
+        base = {
+            "issuer_id": issuer.issuer_id,
+            "issuer_name": issuer.display_name,
+            "attempts": attempts,
+            "authoritative_claims": authoritative,
+            "claim_comparisons": comparisons,
+        }
+        if "mismatch" in comparisons.values():
+            return VerificationResult(
+                status=VerificationStatus.CLAIMS_MISMATCH,
+                explanation=(
+                    "The issuer record exists, but its identity or credential claims conflict "
+                    "with the submitted certificate."
+                ),
+                **base,
+            )
+        supplied = VerificationService._supplied_claims(submission_claims)
+        if any(field not in comparisons for field in supplied):
+            # A trusted claim was supplied but the record did not expose it, so
+            # the certificate is not fully bound; never return VERIFIED here.
+            return VerificationResult(
+                status=VerificationStatus.LOOKUP_INCONCLUSIVE,
+                explanation=(
+                    "The issuer record was found, but it did not expose every claim supplied "
+                    "from the trusted submission record; the certificate is not fully bound "
+                    "to the record."
+                ),
+                **base,
+            )
+        if comparisons and all(value == "match" for value in comparisons.values()):
+            return VerificationResult(
+                status=VerificationStatus.VERIFIED,
+                explanation=(
+                    "The issuer record was found and its available claims matched the "
+                    "submitted certificate."
+                ),
+                **base,
+            )
+        return VerificationResult(
+            status=VerificationStatus.RECORD_FOUND,
+            explanation=(
+                "The issuer record was found, but there was not enough structured claim data "
+                "to bind it to the submitted certificate."
+            ),
+            **base,
         )
 
     @staticmethod
@@ -280,6 +334,16 @@ class VerificationService:
             left = VerificationService._normalize_claim(submitted_value)
             comparisons[field] = "match" if left == authoritative_value else "mismatch"
         return comparisons
+
+    @staticmethod
+    def _supplied_claims(submitted: SubmissionClaims | None) -> list[str]:
+        if submitted is None:
+            return []
+        return [
+            field
+            for field in ("recipient", "credential_title")
+            if getattr(submitted, field)
+        ]
 
     @staticmethod
     def _normalize_claim(value: str) -> str:

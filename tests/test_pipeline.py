@@ -1,6 +1,12 @@
 import cv2
+import pytest
 
-from certguard.pipeline import CertGuardPipeline
+from certguard.models import (
+    TemplateResult,
+    VerificationResult,
+    VerificationStatus,
+)
+from certguard.pipeline import CertGuardPipeline, _review_reasons
 from certguard.registry import IssuerRegistry
 from certguard.verification import LookupResponse
 
@@ -83,3 +89,35 @@ def test_pipeline_routes_stolen_record_claims_to_review(tmp_path) -> None:
     assert report.authenticity_assessment == "issuer-record-mismatch"
     assert report.risk_score == 70
     assert report.review_recommended
+
+
+def test_review_threshold_is_honored() -> None:
+    verification = VerificationResult(
+        status=VerificationStatus.VERIFIED,
+        issuer_id="example",
+        issuer_name="Example",
+        explanation="",
+    )
+    template = TemplateResult(available=False)
+    default = _review_reasons(verification, template, 0.9, 60.0, 55.0)
+    raised = _review_reasons(verification, template, 0.9, 60.0, 65.0)
+
+    assert any("exceeds the review threshold" in reason for reason in default)
+    assert not any("exceeds the review threshold" in reason for reason in raised)
+
+
+def test_invalid_review_threshold_is_rejected() -> None:
+    with pytest.raises(ValueError, match="review_threshold"):
+        CertGuardPipeline(review_threshold=0.0)
+
+
+def test_unused_provenance_parameter_is_accepted() -> None:
+    assert _review_reasons(
+        VerificationResult(
+            status=VerificationStatus.VERIFIED, issuer_id="x", issuer_name="x", explanation=""
+        ),
+        TemplateResult(available=False),
+        0.9,
+        0.0,
+        55.0,
+    ) == []

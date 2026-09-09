@@ -34,6 +34,29 @@ certguard certificate.pdf --offline --output reports\submission.json --audit-log
 
 Enable live issuer lookup by omitting `--offline`. Public verification pages change over time, so their patterns and success/failure markers require monitored maintenance before production use.
 
+Analyze several documents or all supported files in a directory as one fault-tolerant batch:
+
+```powershell
+certguard submissions --recursive --offline --output reports\batch.json
+certguard alice.pdf bob.png --expected-credential-title "Python Basics" --output reports\batch.json
+```
+
+The batch report includes completed/failed counts, the number requiring review, verification-status totals, and each document's complete analysis report. A failed or unreadable document is recorded without stopping the remaining analyses. `--submission-id` and `--expected-recipient` remain single-document options because batch identity binding requires a roster or manifest.
+
+Bind each document to its student with a CSV manifest so batch results become claim-bound:
+
+```powershell
+certguard submissions --manifest class.csv --output reports\batch.json
+```
+
+```csv
+filename,student_id,expected_recipient,expected_credential_title
+rahul.pdf,CS21001,Rahul Kumar,Python Basics
+priya.png,CS21002,Priya Sharma,Python Basics
+```
+
+Filename matching is case-insensitive and uses the file name only. Manifest rows override the batch-level `--expected-credential-title`, each report item carries the student ID, and manifest entries without a matching document are listed under `unmatched_manifest_entries`.
+
 For a full issuer-record match, pass claims from the trusted academic submission record rather than trusting OCR alone:
 
 ```powershell
@@ -103,6 +126,7 @@ src/certguard/
   forensics.py      alignment, SSIM, recapture, ELA, copy-move, EXIF
   scoring.py        transparent weighted risk contributions
   pipeline.py       orchestration and per-check audit trail
+  batch.py          multi-document discovery, processing, and summary reports
   audit.py          replaceable JSONL audit sink
   cli.py            command-line entry point
 ```

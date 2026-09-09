@@ -37,6 +37,8 @@ class CertGuardPipeline:
         network_enabled: bool = True,
         review_threshold: float = 55.0,
     ) -> None:
+        if not 0 < review_threshold <= 100:
+            raise ValueError("review_threshold must be within (0, 100]")
         self.registry = registry or IssuerRegistry.default()
         self.verification = VerificationService(
             self.registry, network_enabled=network_enabled
@@ -164,7 +166,9 @@ class CertGuardPipeline:
         risk_score, coverage, contributions = calculate_risk(
             verification, template, provenance, content
         )
-        review_reasons = _review_reasons(verification, template, coverage, risk_score)
+        review_reasons = _review_reasons(
+            verification, template, coverage, risk_score, self.review_threshold
+        )
         report = AnalysisReport(
             submission_id=submission_id,
             source_sha256=source_hash,
@@ -259,6 +263,7 @@ def _review_reasons(
     template: TemplateResult,
     coverage: float,
     risk_score: float,
+    review_threshold: float,
 ) -> list[str]:
     reasons: list[str] = []
     if verification.status in {
@@ -272,7 +277,7 @@ def _review_reasons(
         reasons.append("The layout differs substantially from a configured issuer reference.")
     if coverage < 0.75:
         reasons.append("Evidence coverage is limited; manual verification is required.")
-    if risk_score >= 55 and not reasons:
+    if risk_score >= review_threshold and not reasons:
         reasons.append("The combined adverse evidence exceeds the review threshold.")
     return reasons
 

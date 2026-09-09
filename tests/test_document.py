@@ -5,7 +5,11 @@ import cv2
 import numpy as np
 import pytest
 
-from certguard.document import extract_document, load_document
+from certguard.document import (
+    DocumentTooLargeError,
+    extract_document,
+    load_document,
+)
 
 
 def test_loads_raster_image(tmp_path) -> None:
@@ -24,6 +28,84 @@ def test_rejects_unreadable_raster_image(tmp_path) -> None:
         load_document(tmp_path / "missing.png")
 
 
+def test_rejects_oversized_source_file(tmp_path) -> None:
+    path = tmp_path / "certificate.png"
+    path.write_bytes(b"\x00" * 64)
+    oversized = DocumentTooLargeError.__bases__[0]  # sanity: subclass of ValueError
+    assert issubclass(oversized, ValueError)
+
+    import certguard.document as document_module
+
+    original = document_module.MAX_SOURCE_BYTES
+    document_module.MAX_SOURCE_BYTES = 32
+    try:
+        with pytest.raises(DocumentTooLargeError, match="maximum supported size"):
+            load_document(path)
+    finally:
+        document_module.MAX_SOURCE_BYTES = original
+
+
+def test_rejects_excessive_pdf_page_count(monkeypatch, tmp_path) -> None:
+    import fitz
+
+    class Document:
+        page_count = 21
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(fitz, "open", lambda _path: Document())
+
+    with pytest.raises(DocumentTooLargeError, match="pages"):
+        load_document(tmp_path / "huge.pdf")
+
+
+def test_rejects_rendered_page_over_pixel_budget(monkeypatch, tmp_path) -> None:
+    import fitz
+
+    class Rect:
+        width = 60000.0
+        height = 60000.0
+
+    class Page:
+        rect = Rect()
+
+    class Document:
+        page_count = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def __getitem__(self, index):
+            return Page()
+
+    monkeypatch.setattr(fitz, "open", lambda _path: Document())
+
+    with pytest.raises(DocumentTooLargeError, match="pixel budget"):
+        load_document(tmp_path / "certificate.pdf", dpi=200)
+
+
+def test_rejects_raster_image_over_pixel_budget(tmp_path) -> None:
+    path = tmp_path / "certificate.png"
+    assert cv2.imwrite(str(path), np.zeros((4, 4, 3), dtype=np.uint8))
+
+    import certguard.document as document_module
+
+    original = document_module.MAX_IMAGE_PIXELS
+    document_module.MAX_IMAGE_PIXELS = 4
+    try:
+        with pytest.raises(DocumentTooLargeError, match="pixel budget"):
+            load_document(path)
+    finally:
+        document_module.MAX_IMAGE_PIXELS = original
+
+
 def test_loads_first_pdf_page(monkeypatch, tmp_path) -> None:
     import fitz
 
@@ -34,6 +116,10 @@ def test_loads_first_pdf_page(monkeypatch, tmp_path) -> None:
         n = 3
 
     class Page:
+        class rect:
+            width = 1.0
+            height = 1.0
+
         def get_pixmap(self, *, matrix, alpha):
             assert matrix is not None
             assert alpha is False
