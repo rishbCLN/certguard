@@ -25,11 +25,24 @@ class JsonlAuditSink:
             extraction["text"] = "[redacted from audit log]"
             extraction["formatted_text"] = "[redacted from audit log]"
             extraction["structured_fields"] = {}
+            extraction["certificate_ids"] = []
+            extraction["urls"] = []
+            extraction["qr_values"] = []
             extraction["pages"] = []
         search = record.get("search")
         if isinstance(search, dict):
             search["query"] = None
             search["results"] = []
+            search["accepted_urls"] = []
+        verification = record.get("verification")
+        if isinstance(verification, dict):
+            verification["authoritative_claims"] = {}
+            verification["claim_comparisons"] = {}
+            verification["attempts"] = [
+                {key: value for key, value in attempt.items() if key != "url"}
+                for attempt in verification.get("attempts", [])
+                if isinstance(attempt, dict)
+            ]
         serialized = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
         try:
             with self._lock:

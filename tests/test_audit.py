@@ -22,9 +22,23 @@ class PrivateDataReport:
                 "text": "Alice Private",
                 "formatted_text": "Recipient: Alice Private",
                 "structured_fields": {"recipient": "Alice Private"},
+                "certificate_ids": ["ABC123"],
+                "urls": ["https://private.example/ABC123"],
+                "qr_values": ["https://private.example/ABC123"],
                 "pages": [{"text": "Alice Private"}],
             },
-            "search": {"query": '"ABC123"', "results": [{"description": "Alice Private"}]},
+            "search": {
+                "query": '"ABC123"',
+                "results": [{"description": "Alice Private"}],
+                "accepted_urls": ["https://private.example/ABC123"],
+            },
+            "verification": {
+                "authoritative_claims": {"recipient": "Alice Private"},
+                "claim_comparisons": {"recipient": "match"},
+                "attempts": [
+                    {"url": "https://private.example/ABC123", "outcome": "verified"}
+                ],
+            },
         }
 
 
@@ -63,6 +77,13 @@ def test_private_extraction_and_search_content_is_redacted(tmp_path) -> None:
     assert record["extraction"]["text"] == "[redacted from audit log]"
     assert record["extraction"]["formatted_text"] == "[redacted from audit log]"
     assert record["extraction"]["structured_fields"] == {}
+    assert record["extraction"]["certificate_ids"] == []
+    assert record["extraction"]["urls"] == []
+    assert record["extraction"]["qr_values"] == []
     assert record["extraction"]["pages"] == []
     assert record["search"]["query"] is None
     assert record["search"]["results"] == []
+    assert record["search"]["accepted_urls"] == []
+    assert record["verification"]["authoritative_claims"] == {}
+    assert record["verification"]["claim_comparisons"] == {}
+    assert record["verification"]["attempts"] == [{"outcome": "verified"}]

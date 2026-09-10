@@ -96,6 +96,45 @@ class LoadedDocument:
     images: list[np.ndarray]
     native_texts: list[str]
     page_count: int
+    evidence: list[PageEvidence] | None = None
+
+
+@dataclass(slots=True)
+class TextSpan:
+    text: str
+    box: tuple[float, float, float, float]
+    source: str
+    confidence: float | None = None
+    baseline: float | None = None
+    font_name: str | None = None
+    font_size: float | None = None
+
+
+@dataclass(slots=True)
+class QRObservation:
+    value: str
+    polygon: tuple[tuple[float, float], ...]
+
+
+@dataclass(slots=True)
+class PageEvidence:
+    page_number: int
+    width_px: int
+    height_px: int
+    width_pt: float | None = None
+    height_pt: float | None = None
+    text_spans: list[TextSpan] | None = None
+    qr_observations: list[QRObservation] | None = None
+    vector_drawing_count: int = 0
+    embedded_image_dpi: list[float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.text_spans is None:
+            self.text_spans = []
+        if self.qr_observations is None:
+            self.qr_observations = []
+        if self.embedded_image_dpi is None:
+            self.embedded_image_dpi = []
 
 
 def load_document(path: Path, dpi: int = 200) -> tuple[np.ndarray, int]:
@@ -128,6 +167,7 @@ def load_document_pages(
                     )
                 images: list[np.ndarray] = []
                 native_texts: list[str] = []
+                evidence: list[PageEvidence] = []
                 page_indexes = range(document.page_count) if render_all_pages else range(1)
                 for page_index in page_indexes:
                     page = document[page_index]
@@ -152,7 +192,21 @@ def load_document_pages(
                     images.append(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
                     get_text = getattr(page, "get_text", None)
                     native_texts.append(get_text("text").strip() if get_text else "")
-                return LoadedDocument(images, native_texts, document.page_count)
+                    spans = _pdf_text_spans(page)
+                    drawings = getattr(page, "get_drawings", lambda: [])()
+                    evidence.append(
+                        PageEvidence(
+                            page_number=page_index + 1,
+                            width_px=pixmap.width,
+                            height_px=pixmap.height,
+                            width_pt=float(page.rect.width),
+                            height_pt=float(page.rect.height),
+                            text_spans=spans,
+                            vector_drawing_count=len(drawings),
+                            embedded_image_dpi=_pdf_image_dpi(page),
+                        )
+                    )
+                return LoadedDocument(images, native_texts, document.page_count, evidence)
         except ValueError:
             raise
         except (fitz.FileDataError, OSError, RuntimeError) as exc:
@@ -164,7 +218,12 @@ def load_document_pages(
         raise DocumentTooLargeError(
             "Image dimensions exceed the maximum supported pixel budget"
         )
-    return LoadedDocument([image], [""], 1)
+    return LoadedDocument(
+        [image],
+        [""],
+        1,
+        [PageEvidence(1, image.shape[1], image.shape[0])],
+    )
 
 
 def extract_document(
@@ -173,29 +232,33 @@ def extract_document(
     *,
     native_text: str = "",
     page_number: int = 1,
+    page_evidence: PageEvidence | None = None,
 ) -> ExtractionResult:
     errors: list[str] = []
     ocr_text = ""
     confidence: float | None = None
+    ocr_spans: list[TextSpan] = []
     if not native_text.strip():
         try:
             import pytesseract
 
-            ocr_text, confidence = _run_ocr(image, pytesseract)
+            ocr_text, confidence, ocr_spans = _run_ocr(image, pytesseract)
             if confidence is not None and confidence < 0.55:
                 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
                 prepared = cv2.threshold(
                     gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
                 )[1]
-                retry_text, retry_confidence = _run_ocr(prepared, pytesseract)
+                retry_text, retry_confidence, retry_spans = _run_ocr(prepared, pytesseract)
                 if retry_confidence is not None and retry_confidence > confidence:
-                    ocr_text, confidence = retry_text, retry_confidence
+                    ocr_text, confidence, ocr_spans = retry_text, retry_confidence, retry_spans
         except Exception as exc:
             errors.append(f"OCR unavailable: {type(exc).__name__}: {exc}")
 
     qr_values: list[str] = []
+    qr_observations: list[QRObservation] = []
     try:
-        qr_values.extend(_decode_qr(image))
+        qr_observations = _decode_qr_observations(image)
+        qr_values.extend(item.value for item in qr_observations)
     except cv2.error as exc:
         errors.append(f"QR decode failed: {exc}")
 
@@ -206,6 +269,9 @@ def extract_document(
     urls = _extract_urls(combined)
     certificate_ids = _extract_certificate_ids(combined, qr_values)
     structured_fields = _extract_structured_fields(text, certificate_ids)
+    if page_evidence is not None:
+        page_evidence.text_spans = _merge_text_spans(page_evidence.text_spans or [], ocr_spans)
+        page_evidence.qr_observations = qr_observations
     return ExtractionResult(
         text=text,
         structured_fields=structured_fields,
@@ -236,12 +302,18 @@ def extract_document(
 
 
 def extract_loaded_document(document: LoadedDocument) -> ExtractionResult:
+    if document.evidence is None:
+        document.evidence = [
+            PageEvidence(index + 1, image.shape[1], image.shape[0])
+            for index, image in enumerate(document.images)
+        ]
     page_results = [
         extract_document(
             image,
             document.page_count,
             native_text=document.native_texts[index],
             page_number=index + 1,
+            page_evidence=document.evidence[index],
         )
         for index, image in enumerate(document.images)
     ]
@@ -269,7 +341,9 @@ def extract_loaded_document(document: LoadedDocument) -> ExtractionResult:
     )
 
 
-def _run_ocr(image: np.ndarray, pytesseract) -> tuple[str, float | None]:  # noqa: ANN001
+def _run_ocr(
+    image: np.ndarray, pytesseract
+) -> tuple[str, float | None, list[TextSpan]]:  # noqa: ANN001
     rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB) if image.ndim == 2 else cv2.cvtColor(
         image, cv2.COLOR_BGR2RGB
     )
@@ -283,7 +357,107 @@ def _run_ocr(image: np.ndarray, pytesseract) -> tuple[str, float | None]:  # noq
     words = [word.strip() for word in data["text"] if word.strip()]
     values = [float(value) for value in data["conf"] if float(value) >= 0]
     confidence = round(sum(values) / len(values) / 100, 3) if values else None
-    return _text_from_ocr_data(data, words), confidence
+    return _text_from_ocr_data(data, words), confidence, _ocr_text_spans(data, image.shape)
+
+
+def _ocr_text_spans(data: dict, shape: tuple[int, ...]) -> list[TextSpan]:
+    required = ("text", "left", "top", "width", "height")
+    if not all(key in data for key in required):
+        return []
+    height_px, width_px = shape[:2]
+    spans: list[TextSpan] = []
+    for index, raw_text in enumerate(data["text"]):
+        text = str(raw_text).strip()
+        if not text:
+            continue
+        left = float(data["left"][index]) / width_px
+        top = float(data["top"][index]) / height_px
+        width = float(data["width"][index]) / width_px
+        height = float(data["height"][index]) / height_px
+        raw_confidence = float(data.get("conf", [-1] * len(data["text"]))[index])
+        spans.append(
+            TextSpan(
+                text=text,
+                box=(left, top, width, height),
+                source="tesseract",
+                confidence=(raw_confidence / 100 if raw_confidence >= 0 else None),
+                baseline=top + height,
+            )
+        )
+    return spans
+
+
+def _pdf_text_spans(page) -> list[TextSpan]:  # noqa: ANN001
+    get_text = getattr(page, "get_text", None)
+    if get_text is None:
+        return []
+    try:
+        payload = get_text("dict")
+    except (TypeError, ValueError):
+        return []
+    width = float(page.rect.width)
+    height = float(page.rect.height)
+    spans: list[TextSpan] = []
+    for block in payload.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = str(span.get("text", "")).strip()
+                box = span.get("bbox")
+                if not text or not isinstance(box, list | tuple) or len(box) != 4:
+                    continue
+                x0, y0, x1, y1 = (float(value) for value in box)
+                spans.append(
+                    TextSpan(
+                        text=text,
+                        box=(x0 / width, y0 / height, (x1 - x0) / width, (y1 - y0) / height),
+                        source="native-pdf",
+                        baseline=y1 / height,
+                        font_name=str(span.get("font")) if span.get("font") else None,
+                        font_size=float(span["size"]) if span.get("size") else None,
+                    )
+                )
+    return spans
+
+
+def _pdf_image_dpi(page) -> list[float]:  # noqa: ANN001
+    values: list[float] = []
+    get_images = getattr(page, "get_images", None)
+    get_rects = getattr(page, "get_image_rects", None)
+    if get_images is None or get_rects is None:
+        return values
+    for image in get_images(full=True):
+        if len(image) < 4:
+            continue
+        xref, width_px, height_px = image[0], image[2], image[3]
+        for rect in get_rects(xref):
+            if rect.width > 0 and rect.height > 0:
+                dpi_x = float(width_px) / (float(rect.width) / 72)
+                dpi_y = float(height_px) / (float(rect.height) / 72)
+                values.append(round((dpi_x + dpi_y) / 2, 3))
+    return values
+
+
+def _merge_text_spans(native: list[TextSpan], ocr: list[TextSpan]) -> list[TextSpan]:
+    merged = list(native)
+    for candidate in ocr:
+        if not any(
+            existing.text.casefold() == candidate.text.casefold()
+            and _box_overlap(existing.box, candidate.box) > 0.7
+            for existing in native
+        ):
+            merged.append(candidate)
+    return merged
+
+
+def _box_overlap(
+    left: tuple[float, float, float, float], right: tuple[float, float, float, float]
+) -> float:
+    lx, ly, lw, lh = left
+    rx, ry, rw, rh = right
+    intersection = max(0.0, min(lx + lw, rx + rw) - max(lx, rx)) * max(
+        0.0, min(ly + lh, ry + rh) - max(ly, ry)
+    )
+    return intersection / max(min(lw * lh, rw * rh), 1e-9)
 
 
 def _text_from_ocr_data(data: dict, words: list[str]) -> str:
@@ -346,17 +520,21 @@ def _format_structured_fields(fields: dict[str, str]) -> str:
 
 
 def _decode_qr(image: np.ndarray) -> list[str]:
-    values: list[str] = []
+    return [item.value for item in _decode_qr_observations(image)]
+
+
+def _decode_qr_observations(image: np.ndarray) -> list[QRObservation]:
+    observations: list[QRObservation] = []
     detector = cv2.QRCodeDetector()
-    found, decoded, _points, _ = detector.detectAndDecodeMulti(image)
+    found, decoded, points, _ = detector.detectAndDecodeMulti(image)
     if found:
-        values.extend(value.strip() for value in decoded if value.strip())
+        observations.extend(_qr_observations(decoded, points, image.shape))
     else:
-        value, _points, _ = detector.detectAndDecode(image)
+        value, points, _ = detector.detectAndDecode(image)
         if value.strip():
-            values.append(value.strip())
-    if values:
-        return values
+            observations.extend(_qr_observations((value,), points, image.shape))
+    if observations:
+        return observations
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     for preprocess in (
         lambda g: cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
@@ -367,16 +545,34 @@ def _decode_qr(image: np.ndarray) -> list[str]:
         lambda g: cv2.convertScaleAbs(g, alpha=1.5, beta=0),
     ):
         processed = preprocess(gray)
-        found, decoded, _points, _ = detector.detectAndDecodeMulti(processed)
+        found, decoded, points, _ = detector.detectAndDecodeMulti(processed)
         if found:
-            values.extend(value.strip() for value in decoded if value.strip())
+            observations.extend(_qr_observations(decoded, points, image.shape))
         else:
-            value, _points, _ = detector.detectAndDecode(processed)
+            value, points, _ = detector.detectAndDecode(processed)
             if value.strip():
-                values.append(value.strip())
-        if values:
+                observations.extend(_qr_observations((value,), points, image.shape))
+        if observations:
             break
-    return values
+    return observations
+
+
+def _qr_observations(decoded, points, shape: tuple[int, ...]) -> list[QRObservation]:  # noqa: ANN001
+    height, width = shape[:2]
+    point_sets = np.asarray(points).reshape(-1, 4, 2) if points is not None else []
+    observations: list[QRObservation] = []
+    for index, raw_value in enumerate(decoded):
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        polygon: tuple[tuple[float, float], ...] = ()
+        if index < len(point_sets):
+            polygon = tuple(
+                (float(point[0]) / width, float(point[1]) / height)
+                for point in point_sets[index]
+            )
+        observations.append(QRObservation(value, polygon))
+    return observations
 
 
 def _extract_urls(text: str) -> list[str]:

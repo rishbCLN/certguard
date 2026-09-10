@@ -6,6 +6,7 @@ from certguard.models import (
     ExtractionResult,
     ProvenanceResult,
     SearchResult,
+    SSDDResult,
     TemplateResult,
     VerificationResult,
     VerificationStatus,
@@ -127,7 +128,7 @@ def test_pipeline_uses_search_discovered_official_record(tmp_path, monkeypatch) 
     assert report.search.accepted_urls == ["https://verify.example.org/c/ABC123"]
     assert report.verification.status == VerificationStatus.VERIFIED
     assert report.extraction.text == "Example Certificate ID: ABC123"
-    assert report.report_version == "1.3"
+    assert report.report_version == "2.1"
 
 
 def test_review_threshold_is_honored() -> None:
@@ -139,10 +140,10 @@ def test_review_threshold_is_honored() -> None:
     )
     template = TemplateResult(available=False)
     default = _review_reasons(
-        verification, template, ProvenanceResult(), 0.9, 60.0, 55.0
+        verification, template, ProvenanceResult(), SSDDResult(), 0.9, 60.0, 55.0
     )
     raised = _review_reasons(
-        verification, template, ProvenanceResult(), 0.9, 60.0, 65.0
+        verification, template, ProvenanceResult(), SSDDResult(), 0.9, 60.0, 65.0
     )
 
     assert any("exceeds the review threshold" in reason for reason in default)
@@ -161,6 +162,7 @@ def test_unused_provenance_parameter_is_accepted() -> None:
         ),
         TemplateResult(available=False),
         ProvenanceResult(),
+        SSDDResult(),
         0.9,
         0.0,
         55.0,
@@ -177,6 +179,7 @@ def test_high_neural_forgery_signal_routes_to_review() -> None:
         ),
         TemplateResult(available=False),
         ProvenanceResult(neural_model_available=True, neural_forgery_score=0.9),
+        SSDDResult(),
         0.9,
         5.0,
         55.0,

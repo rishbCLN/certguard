@@ -4,6 +4,7 @@ from certguard.models import (
     ContentResult,
     ProvenanceResult,
     RiskContribution,
+    SSDDResult,
     TemplateResult,
     VerificationResult,
     VerificationStatus,
@@ -24,6 +25,7 @@ def calculate_risk(
     template: TemplateResult,
     provenance: ProvenanceResult,
     content: ContentResult,
+    ssdd: SSDDResult | None = None,
 ) -> tuple[float, float, list[RiskContribution]]:
     signals: list[tuple[str, float, float, str]] = []
     if verification.status in VERIFICATION_RISK:
@@ -74,7 +76,24 @@ def calculate_risk(
         )
         for name, raw_risk, weight, explanation in signals
     ]
+    ssdd = ssdd or SSDDResult()
+    if ssdd.scoring_enabled and ssdd.status == "completed" and ssdd.risk_points > 0:
+        contributions.append(
+            RiskContribution(
+                signal="semantic_structural_dissonance",
+                raw_risk=round(ssdd.delta or 0, 3),
+                weight=0.10,
+                points=ssdd.risk_points,
+                explanation="Signed issuer grammar calibration selected fixed SSDD policy points.",
+                calculation="calibrated-threshold-points",
+            )
+        )
     model_expected = provenance.neural_model_available
     scorable_weight = BASE_SCORABLE_WEIGHT + (FORENSIC_MODEL_WEIGHT if model_expected else 0)
     coverage = round(sum(weight for _, _, weight, _ in signals) / scorable_weight, 3)
-    return round(sum(item.points for item in contributions), 1), coverage, contributions
+    if ssdd.status != "not-configured":
+        achieved = 0.10 if ssdd.status == "completed" else 0.0
+        coverage = round((coverage * scorable_weight + achieved) / (scorable_weight + 0.10), 3)
+        if ssdd.status != "completed":
+            coverage = min(coverage, 0.72)
+    return min(100.0, round(sum(item.points for item in contributions), 1)), coverage, contributions

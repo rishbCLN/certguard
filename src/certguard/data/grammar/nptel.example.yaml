@@ -1,0 +1,14 @@
+schema_version: 1
+issuer_id: nptel
+variant_id: nptel-template-pending
+display_name: NPTEL template placeholder
+version: "1.0"
+active: false
+template: {}
+minimum_evaluable_fraction: 0.75
+regions: {}
+grammar: []
+qr_bindings: []
+rendering: {}
+calibration:
+  scoring_enabled: false

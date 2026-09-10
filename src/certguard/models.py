@@ -139,12 +139,36 @@ class ContentResult:
 
 
 @dataclass(slots=True)
+class SSDDProfileRef:
+    issuer_id: str
+    variant_id: str
+    version: str
+
+
+@dataclass(slots=True)
+class SSDDResult:
+    status: str = "not-configured"
+    delta: float | None = 0.0
+    violations: list[str] = field(default_factory=list)
+    issuer_grammar_match: float | None = 1.0
+    detected_by: str = "ssdd-v2.1"
+    model_sha256: str | None = None
+    profile: SSDDProfileRef | None = None
+    checks_possible: int = 0
+    checks_evaluated: int = 0
+    unavailable: list[str] = field(default_factory=list)
+    scoring_enabled: bool = False
+    risk_points: float = 0.0
+
+
+@dataclass(slots=True)
 class RiskContribution:
     signal: str
     raw_risk: float
     weight: float
     points: float
     explanation: str
+    calculation: str = "weighted-risk"
 
 
 @dataclass(slots=True)
@@ -166,9 +190,10 @@ class AnalysisReport:
     template: TemplateResult
     provenance: ProvenanceResult
     content: ContentResult
+    ssdd: SSDDResult
     contributions: list[RiskContribution]
     checks: list[AuditCheck]
-    report_version: str = "1.3"
+    report_version: str = "2.1"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -32,6 +32,31 @@ Analyze a submission offline first:
 certguard certificate.pdf --offline --output reports\submission.json --audit-log audit\checks.jsonl
 ```
 
+Enable a signed issuer grammar directory for semantic-structural checks:
+
+```powershell
+$env:CERTGUARD_GRAMMAR_HMAC_KEY_FILE = "C:\secure\certguard-grammar.key"
+certguard certificate.pdf --grammar-root issuer\grammar --offline
+```
+
+Grammar profiles are issuer- and layout-specific. Active profiles require an HMAC-SHA256
+signature and a SHA-256-pinned template; invalid profiles fail closed and route applicable
+documents to review. The packaged NPTEL, SWAYAM, and Coursera files are intentionally inactive
+placeholders and do not change scores.
+
+Build a signed profile after adding an approved template and annotated manifest:
+
+```powershell
+$env:CERTGUARD_GRAMMAR_HMAC_KEY_FILE = "C:\secure\certguard-grammar.key"
+certguard build-grammar --issuer nptel --variant nptel-v1 `
+  --template approved\nptel-v1.png --manifest approved\nptel-v1.manifest.yaml `
+  --output issuer\grammar\nptel-v1.yaml
+```
+
+The builder copies the immutable template into the grammar directory, records its hash, validates
+the profile, and updates `.signatures.json`. Profiles default to shadow-mode evidence; numeric SSDD
+points require signed calibration metadata with `scoring_enabled: true`.
+
 Enable live issuer lookup by omitting `--offline`. Public verification pages change over time, so their patterns and success/failure markers require monitored maintenance before production use.
 
 Optionally enable Brave text-search discovery. Certificate images, full OCR text, and recipient names are not sent to Brave; the query contains the recognized issuer, certificate ID, and configured official domains. Search results are evidence discovery only and cannot verify a certificate unless the resulting approved official page is fetched and its claims match.

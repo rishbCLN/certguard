@@ -202,3 +202,18 @@ def test_onnx_forgery_model_is_passed_to_pipeline(monkeypatch, tmp_path, capsys)
 
     assert json.loads(capsys.readouterr().out) == {"mode": "single"}
     assert Pipeline.init_kwargs[0]["forgery_model"] is model
+
+
+def test_grammar_root_is_passed_to_pipeline(monkeypatch, tmp_path, capsys) -> None:
+    source = tmp_path / "certificate.pdf"
+    grammar_root = tmp_path / "grammar"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["certguard", str(source), "--grammar-root", str(grammar_root)],
+    )
+
+    assert cli.main() == 0
+
+    assert json.loads(capsys.readouterr().out) == {"mode": "single"}
+    assert Pipeline.init_kwargs[0]["grammar_root"] == grammar_root

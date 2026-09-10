@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from certguard.audit import JsonlAuditSink
@@ -11,6 +12,7 @@ from certguard.forensics import OnnxForgeryModel
 from certguard.pipeline import CertGuardPipeline
 from certguard.registry import IssuerRegistry
 from certguard.search import BraveSearchClient
+from certguard.ssdd import GrammarProfileError, build_grammar_profile
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Certificate image/PDF or directory; multiple values create a batch report",
     )
     parser.add_argument("--registry", type=Path, help="Custom issuer registry JSON")
+    parser.add_argument("--grammar-root", type=Path, help="Signed issuer grammar profile directory")
     parser.add_argument("--templates", type=Path, help="Reference template directory")
     parser.add_argument(
         "--forgery-model",
@@ -63,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "build-grammar":
+        return build_grammar_main(sys.argv[2:])
     parser = build_parser()
     args = parser.parse_args()
     batch_requested = len(args.documents) > 1 or any(path.is_dir() for path in args.documents)
@@ -98,6 +103,7 @@ def main() -> int:
         search_client=search_client,
         search_enabled=bool(args.search),
         forgery_model=forgery_model,
+        grammar_root=args.grammar_root,
     )
     if batch_requested:
         manifest = load_manifest(args.manifest) if args.manifest else None
@@ -120,6 +126,32 @@ def main() -> int:
         args.output.write_text(rendered, encoding="utf-8")
     else:
         print(rendered)
+    return 0
+
+
+def build_grammar_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="certguard build-grammar")
+    parser.add_argument("--issuer", required=True)
+    parser.add_argument("--variant", required=True)
+    parser.add_argument("--template", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    key_path = os.environ.get("CERTGUARD_GRAMMAR_HMAC_KEY_FILE")
+    if not key_path:
+        parser.error("build-grammar requires CERTGUARD_GRAMMAR_HMAC_KEY_FILE")
+    try:
+        build_grammar_profile(
+            args.issuer,
+            args.variant,
+            args.template,
+            args.manifest,
+            args.output,
+            key_file=Path(key_path),
+        )
+    except (GrammarProfileError, OSError, ValueError) as exc:
+        parser.error(str(exc))
+    print(args.output)
     return 0
 
 

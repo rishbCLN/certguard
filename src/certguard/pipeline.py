@@ -19,6 +19,7 @@ from certguard.models import (
     ExtractionResult,
     ProvenanceResult,
     SearchEvidence,
+    SSDDResult,
     SubmissionClaims,
     TemplateResult,
     VerificationResult,
@@ -27,6 +28,7 @@ from certguard.models import (
 from certguard.registry import IssuerRegistry
 from certguard.scoring import calculate_risk
 from certguard.search import SearchClient, discover_official_pages
+from certguard.ssdd import GrammarProfileError, GrammarStore, run_ssdd
 from certguard.verification import VerificationService
 
 
@@ -40,6 +42,7 @@ class CertGuardPipeline:
         search_client: SearchClient | None = None,
         search_enabled: bool = False,
         forgery_model: ForgeryModel | None = None,
+        grammar_root: Path | None = None,
         review_threshold: float = 55.0,
     ) -> None:
         if not 0 < review_threshold <= 100:
@@ -50,6 +53,14 @@ class CertGuardPipeline:
         )
         self.templates = TemplateAnalyzer(template_root)
         self.provenance = ProvenanceAnalyzer(forgery_model)
+        self.grammar_root = grammar_root
+        self.grammar: GrammarStore | None = None
+        self.grammar_error: GrammarProfileError | None = None
+        if grammar_root is not None:
+            try:
+                self.grammar = GrammarStore.from_environment(grammar_root)
+            except GrammarProfileError as exc:
+                self.grammar_error = exc
         self.search_client = search_client
         self.search_enabled = search_enabled and network_enabled
         self.audit_sink = audit_sink
@@ -194,11 +205,57 @@ class CertGuardPipeline:
             )
         )
 
+        started = time.perf_counter()
+        try:
+            if self.grammar_error is not None:
+                raise self.grammar_error
+            ssdd_run = run_ssdd(
+                self.grammar or GrammarStore(), verification.issuer_id, document, extraction
+            )
+            ssdd = ssdd_run.result
+            checks.append(
+                AuditCheck(
+                    name="semantic_structural_dissonance",
+                    state=(
+                        CheckState.SKIPPED
+                        if ssdd.status == "not-configured"
+                        else CheckState.COMPLETED
+                    ),
+                    summary=f"SSDD completed with status {ssdd.status}.",
+                    evidence={
+                        "status": ssdd.status,
+                        "delta": ssdd.delta,
+                        "violations": ssdd.violations,
+                        "checks_possible": ssdd.checks_possible,
+                        "checks_evaluated": ssdd.checks_evaluated,
+                        "unavailable": ssdd.unavailable,
+                        "model_sha256": ssdd.model_sha256,
+                    },
+                    duration_ms=_elapsed_ms(started),
+                )
+            )
+        except GrammarProfileError as exc:
+            ssdd = SSDDResult(
+                status="profile-invalid",
+                delta=None,
+                issuer_grammar_match=None,
+                unavailable=["profile-validation-failed"],
+            )
+            checks.append(_error_check("semantic_structural_dissonance", exc, started))
+        except Exception as exc:
+            ssdd = SSDDResult(
+                status="error",
+                delta=None,
+                issuer_grammar_match=None,
+                unavailable=["ssdd-operational-error"],
+            )
+            checks.append(_error_check("semantic_structural_dissonance", exc, started))
+
         risk_score, coverage, contributions = calculate_risk(
-            verification, template, provenance, content
+            verification, template, provenance, content, ssdd
         )
         review_reasons = _review_reasons(
-            verification, template, provenance, coverage, risk_score, self.review_threshold
+            verification, template, provenance, ssdd, coverage, risk_score, self.review_threshold
         )
         report = AnalysisReport(
             submission_id=submission_id,
@@ -212,7 +269,7 @@ class CertGuardPipeline:
             authenticity_assessment=_authenticity_assessment(verification, template),
             ai_origin_assessment=_ai_origin_assessment(provenance),
             ruleset_fingerprint=_ruleset_fingerprint(
-                self.registry, self.provenance.forgery_model
+                self.registry, self.provenance.forgery_model, self.grammar
             ),
             extraction=extraction,
             search=search,
@@ -220,6 +277,7 @@ class CertGuardPipeline:
             template=template,
             provenance=provenance,
             content=content,
+            ssdd=ssdd,
             contributions=contributions,
             checks=checks,
         )
@@ -326,6 +384,7 @@ def _review_reasons(
     verification: VerificationResult,
     template: TemplateResult,
     provenance: ProvenanceResult,
+    ssdd: SSDDResult,
     coverage: float,
     risk_score: float,
     review_threshold: float,
@@ -345,6 +404,10 @@ def _review_reasons(
         and provenance.neural_forgery_score >= 0.75
     ):
         reasons.append("The configured forgery model returned a high-risk signal.")
+    if ssdd.status in {"insufficient-evidence", "profile-invalid", "error"}:
+        reasons.append("Issuer grammar evidence was unavailable or incomplete.")
+    elif ssdd.status == "completed" and "text-qr-binding-failure" in ssdd.violations:
+        reasons.append("Certificate text did not match configured trusted QR claims.")
     if coverage < 0.75:
         reasons.append("Evidence coverage is limited; manual verification is required.")
     if risk_score >= review_threshold and not reasons:
@@ -380,7 +443,9 @@ def _authenticity_assessment(
 
 
 def _ruleset_fingerprint(
-    registry: IssuerRegistry, forgery_model: ForgeryModel | None = None
+    registry: IssuerRegistry,
+    forgery_model: ForgeryModel | None = None,
+    grammar: GrammarStore | None = None,
 ) -> str:
     payload = []
     for issuer in sorted(registry.issuers.values(), key=lambda item: item.issuer_id):
@@ -404,6 +469,7 @@ def _ruleset_fingerprint(
             if forgery_model
             else None
         ),
+        "grammar_profiles": grammar.fingerprint_payload() if grammar else [],
     }
     encoded = json.dumps(ruleset, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()

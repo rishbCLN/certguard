@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +19,17 @@ class ForgeryModel(Protocol):
     name: str
 
     def predict(self, image: np.ndarray) -> float: ...
+
+
+@dataclass(slots=True)
+class AlignmentContext:
+    detector: str
+    score: float
+    homography: np.ndarray
+    aligned_image: np.ndarray
+    inlier_count: int
+    match_count: int
+    reprojection_error: float
 
 
 class OnnxForgeryModel:
@@ -174,6 +186,26 @@ class TemplateAnalyzer:
     def _align(
         image: np.ndarray, template: np.ndarray, detector: object, norm: int
     ) -> tuple[float, np.ndarray] | None:
+        result = TemplateAnalyzer._align_context(image, template, "feature", detector, norm)
+        return (result.score, result.aligned_image) if result else None
+
+    @staticmethod
+    def align_images(image: np.ndarray, template: np.ndarray) -> AlignmentContext | None:
+        best: AlignmentContext | None = None
+        for name, detector, norm in TemplateAnalyzer._feature_candidates():
+            result = TemplateAnalyzer._align_context(image, template, name, detector, norm)
+            if result is not None and (best is None or result.score > best.score):
+                best = result
+        return best
+
+    @staticmethod
+    def _align_context(
+        image: np.ndarray,
+        template: np.ndarray,
+        name: str,
+        detector: object,
+        norm: int,
+    ) -> AlignmentContext | None:
         keypoints_image, descriptors_image = detector.detectAndCompute(image, None)
         keypoints_template, descriptors_template = detector.detectAndCompute(template, None)
         if descriptors_image is None or descriptors_template is None:
@@ -193,7 +225,19 @@ class TemplateAnalyzer:
             return None
         aligned = cv2.warpPerspective(image, homography, (template.shape[1], template.shape[0]))
         alignment = float(mask.ravel().mean())
-        return alignment, aligned
+        projected = cv2.perspectiveTransform(source, homography)
+        inliers = mask.ravel().astype(bool)
+        errors = np.linalg.norm(projected.reshape(-1, 2) - target.reshape(-1, 2), axis=1)
+        reprojection_error = float(errors[inliers].mean()) if inliers.any() else float("inf")
+        return AlignmentContext(
+            detector=name,
+            score=alignment,
+            homography=homography,
+            aligned_image=aligned,
+            inlier_count=int(inliers.sum()),
+            match_count=len(good),
+            reprojection_error=reprojection_error,
+        )
 
 
 class ProvenanceAnalyzer:

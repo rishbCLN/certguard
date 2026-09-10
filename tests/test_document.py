@@ -405,3 +405,38 @@ def test_native_pdf_text_keeps_line_layout_for_structured_extraction(monkeypatch
     assert result.structured_fields["recipient"] == "Bob Example"
     assert result.structured_fields["credential_title"] == "Data Engineering"
     assert result.structured_fields["certificate_id"] == "ZXCV1234"
+
+
+def test_ocr_geometry_is_preserved_as_normalized_spans(monkeypatch) -> None:
+    pytesseract = SimpleNamespace(
+        Output=SimpleNamespace(DICT="dict"),
+        image_to_data=lambda *_args, **_kwargs: {
+            "text": ["Alice"],
+            "conf": ["90"],
+            "left": [20],
+            "top": [10],
+            "width": [40],
+            "height": [20],
+        },
+    )
+
+    class Detector:
+        def detectAndDecodeMulti(self, _image):
+            return False, (), None, None
+
+        def detectAndDecode(self, _image):
+            return "", None, None
+
+    monkeypatch.setitem(sys.modules, "pytesseract", pytesseract)
+    monkeypatch.setattr(cv2, "QRCodeDetector", Detector)
+    from certguard.document import PageEvidence
+
+    evidence = PageEvidence(1, 200, 100)
+    extract_document(
+        np.zeros((100, 200, 3), dtype=np.uint8),
+        page_evidence=evidence,
+    )
+
+    assert len(evidence.text_spans) == 1
+    assert evidence.text_spans[0].box == pytest.approx((0.1, 0.1, 0.2, 0.2))
+    assert evidence.text_spans[0].confidence == 0.9
