@@ -7,6 +7,7 @@ from pathlib import Path
 
 from certguard.audit import JsonlAuditSink
 from certguard.batch import BatchProcessor, load_manifest
+from certguard.forensics import OnnxForgeryModel
 from certguard.pipeline import CertGuardPipeline
 from certguard.registry import IssuerRegistry
 from certguard.search import BraveSearchClient
@@ -24,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--registry", type=Path, help="Custom issuer registry JSON")
     parser.add_argument("--templates", type=Path, help="Reference template directory")
+    parser.add_argument(
+        "--forgery-model",
+        type=Path,
+        help="Trained ONNX binary classifier producing genuine/forgery logits or a forgery score",
+    )
     parser.add_argument("--output", type=Path, help="Write the report as JSON")
     parser.add_argument("--audit-log", type=Path, help="Append the report to a JSONL audit log")
     parser.add_argument("--submission-id", help="Stable ID from the host submission system")
@@ -80,6 +86,10 @@ def main() -> int:
 
     registry = IssuerRegistry.from_file(args.registry) if args.registry else IssuerRegistry.default()
     audit_sink = JsonlAuditSink(args.audit_log) if args.audit_log else None
+    try:
+        forgery_model = OnnxForgeryModel(args.forgery_model) if args.forgery_model else None
+    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
     pipeline = CertGuardPipeline(
         registry=registry,
         template_root=args.templates,
@@ -87,6 +97,7 @@ def main() -> int:
         network_enabled=not args.offline,
         search_client=search_client,
         search_enabled=bool(args.search),
+        forgery_model=forgery_model,
     )
     if batch_requested:
         manifest = load_manifest(args.manifest) if args.manifest else None

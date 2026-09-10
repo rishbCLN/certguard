@@ -1,5 +1,5 @@
-import json
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -185,3 +185,20 @@ def test_brave_search_requires_environment_key(monkeypatch, tmp_path) -> None:
         cli.main()
 
     assert error.value.code == 2
+
+
+def test_onnx_forgery_model_is_passed_to_pipeline(monkeypatch, tmp_path, capsys) -> None:
+    source = tmp_path / "certificate.pdf"
+    model_path = tmp_path / "forgery.onnx"
+    model = object()
+    monkeypatch.setattr(cli, "OnnxForgeryModel", lambda path: model if path == model_path else None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["certguard", str(source), "--forgery-model", str(model_path)],
+    )
+
+    assert cli.main() == 0
+
+    assert json.loads(capsys.readouterr().out) == {"mode": "single"}
+    assert Pipeline.init_kwargs[0]["forgery_model"] is model

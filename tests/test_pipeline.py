@@ -3,8 +3,9 @@ import numpy as np
 import pytest
 
 from certguard.models import (
-    SearchResult,
     ExtractionResult,
+    ProvenanceResult,
+    SearchResult,
     TemplateResult,
     VerificationResult,
     VerificationStatus,
@@ -126,7 +127,7 @@ def test_pipeline_uses_search_discovered_official_record(tmp_path, monkeypatch) 
     assert report.search.accepted_urls == ["https://verify.example.org/c/ABC123"]
     assert report.verification.status == VerificationStatus.VERIFIED
     assert report.extraction.text == "Example Certificate ID: ABC123"
-    assert report.report_version == "1.2"
+    assert report.report_version == "1.3"
 
 
 def test_review_threshold_is_honored() -> None:
@@ -137,8 +138,12 @@ def test_review_threshold_is_honored() -> None:
         explanation="",
     )
     template = TemplateResult(available=False)
-    default = _review_reasons(verification, template, 0.9, 60.0, 55.0)
-    raised = _review_reasons(verification, template, 0.9, 60.0, 65.0)
+    default = _review_reasons(
+        verification, template, ProvenanceResult(), 0.9, 60.0, 55.0
+    )
+    raised = _review_reasons(
+        verification, template, ProvenanceResult(), 0.9, 60.0, 65.0
+    )
 
     assert any("exceeds the review threshold" in reason for reason in default)
     assert not any("exceeds the review threshold" in reason for reason in raised)
@@ -155,7 +160,26 @@ def test_unused_provenance_parameter_is_accepted() -> None:
             status=VerificationStatus.VERIFIED, issuer_id="x", issuer_name="x", explanation=""
         ),
         TemplateResult(available=False),
+        ProvenanceResult(),
         0.9,
         0.0,
         55.0,
     ) == []
+
+
+def test_high_neural_forgery_signal_routes_to_review() -> None:
+    reasons = _review_reasons(
+        VerificationResult(
+            status=VerificationStatus.VERIFIED,
+            issuer_id="x",
+            issuer_name="x",
+            explanation="",
+        ),
+        TemplateResult(available=False),
+        ProvenanceResult(neural_model_available=True, neural_forgery_score=0.9),
+        0.9,
+        5.0,
+        55.0,
+    )
+
+    assert reasons == ["The configured forgery model returned a high-risk signal."]

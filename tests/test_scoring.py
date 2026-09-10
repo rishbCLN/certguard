@@ -78,3 +78,26 @@ def test_missing_optional_signal_does_not_inflate_other_weights() -> None:
 
     assert score == 66.5
     assert contributions[0].weight == 0.7
+
+
+def test_configured_neural_model_is_combined_with_artifact_signals() -> None:
+    score, coverage, contributions = calculate_risk(
+        verification(VerificationStatus.VERIFIED),
+        TemplateResult(available=True, anomaly_score=0.0),
+        ProvenanceResult(
+            neural_model_available=True,
+            neural_forgery_score=0.9,
+            frequency_anomaly_score=0.6,
+            jpeg_grid_score=0.4,
+            font_subpixel_score=0.5,
+            digital_edit_anomaly=0.5,
+        ),
+        ContentResult(available=True, anomaly_score=0.0),
+    )
+
+    forensic = contributions[-1]
+    assert forensic.signal == "forgery_model_consensus"
+    assert forensic.weight == 0.07
+    assert forensic.raw_risk == 0.78
+    assert score == 6.9
+    assert coverage == 1.0

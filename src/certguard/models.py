@@ -100,6 +100,8 @@ class TemplateResult:
     issuer_id: str | None = None
     template_id: str | None = None
     alignment_score: float | None = None
+    feature_detector: str | None = None
+    feature_match_scores: dict[str, float] = field(default_factory=dict)
     logo_similarity: float | None = None
     font_shape_similarity: float | None = None
     layout_similarity: float | None = None
@@ -113,7 +115,16 @@ class ProvenanceResult:
     capture_confidence: float = 0.0
     moire_score: float | None = None
     ela_score: float | None = None
+    jpeg_grid_score: float | None = None
+    frequency_anomaly_score: float | None = None
+    font_subpixel_score: float | None = None
     copy_move_score: float | None = None
+    noiseprint_score: float | None = None
+    printer_pattern_score: float | None = None
+    neural_model_available: bool = False
+    neural_model_name: str | None = None
+    neural_forgery_score: float | None = None
+    neural_error: str | None = None
     metadata_flags: list[str] = field(default_factory=list)
     digital_edit_anomaly: float = 0.0
     explanation: str = "Capture method could not be classified."
@@ -157,7 +168,7 @@ class AnalysisReport:
     content: ContentResult
     contributions: list[RiskContribution]
     checks: list[AuditCheck]
-    report_version: str = "1.2"
+    report_version: str = "1.3"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

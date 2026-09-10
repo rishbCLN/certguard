@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import io
 from pathlib import Path
+from typing import Protocol
 
 import cv2
 import numpy as np
@@ -10,6 +12,48 @@ from skimage.metrics import structural_similarity
 
 from certguard.models import ProvenanceResult, TemplateResult
 from certguard.registry import IssuerDefinition
+
+
+class ForgeryModel(Protocol):
+    name: str
+
+    def predict(self, image: np.ndarray) -> float: ...
+
+
+class OnnxForgeryModel:
+    def __init__(self, model_path: Path) -> None:
+        if not model_path.is_file():
+            raise FileNotFoundError(model_path)
+        self.name = model_path.name
+        self.fingerprint = hashlib.sha256(model_path.read_bytes()).hexdigest()
+        try:
+            import onnxruntime as ort
+        except ImportError as exc:
+            raise RuntimeError("ONNX inference requires the optional onnxruntime package") from exc
+        self._session = ort.InferenceSession(
+            str(model_path), providers=["CPUExecutionProvider"]
+        )
+        self._input = self._session.get_inputs()[0]
+
+    def predict(self, image: np.ndarray) -> float:
+        shape = self._input.shape
+        height = shape[2] if len(shape) == 4 and isinstance(shape[2], int) else 224
+        width = shape[3] if len(shape) == 4 and isinstance(shape[3], int) else 224
+        resized = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        tensor = np.transpose(rgb, (2, 0, 1))[None, ...]
+        output = np.asarray(self._session.run(None, {self._input.name: tensor})[0]).squeeze()
+        values = np.ravel(output).astype(float)
+        if values.size == 1:
+            score = float(values[0])
+            if score < 0 or score > 1:
+                score = 1 / (1 + np.exp(-score))
+        elif values.size == 2:
+            shifted = values - values.max()
+            score = float(np.exp(shifted)[1] / np.exp(shifted).sum())
+        else:
+            raise ValueError("Forgery model must produce one score or two class logits")
+        return float(np.clip(score, 0, 1))
 
 
 def _normalized_ssim(left: np.ndarray, right: np.ndarray) -> float:
@@ -62,41 +106,27 @@ class TemplateAnalyzer:
         issuer_id: str,
         definition: dict[str, object],
     ) -> TemplateResult:
-        detector = cv2.ORB_create(nfeatures=3000)
-        keypoints_image, descriptors_image = detector.detectAndCompute(image, None)
-        keypoints_template, descriptors_template = detector.detectAndCompute(template, None)
-        if descriptors_image is None or descriptors_template is None:
-            return TemplateResult(
-                available=False,
-                issuer_id=issuer_id,
-                template_id=str(definition.get("id", definition["image"])),
-                explanation="A template was found, but there were too few visual features to align it.",
-            )
-        matches = cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(descriptors_image, descriptors_template, k=2)
-        good = [
-            pair[0]
-            for pair in matches
-            if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance
-        ]
-        if len(good) < 8:
+        candidates = TemplateAnalyzer._feature_candidates()
+        best_alignment: tuple[str, float, np.ndarray] | None = None
+        match_scores: dict[str, float] = {}
+        for name, detector, norm in candidates:
+            aligned = TemplateAnalyzer._align(image, template, detector, norm)
+            if aligned is None:
+                continue
+            alignment, transformed = aligned
+            match_scores[name] = round(alignment, 3)
+            if best_alignment is None or alignment > best_alignment[1]:
+                best_alignment = (name, alignment, transformed)
+        if best_alignment is None:
             return TemplateResult(
                 available=False,
                 issuer_id=issuer_id,
                 template_id=str(definition.get("id", definition["image"])),
                 alignment_score=0.0,
-                explanation="The upload could not be reliably aligned to the closest issuer template.",
+                feature_match_scores=match_scores,
+                explanation="The upload could not be aligned with any available feature detector.",
             )
-        source = np.float32([keypoints_image[item.queryIdx].pt for item in good]).reshape(-1, 1, 2)
-        target = np.float32([keypoints_template[item.trainIdx].pt for item in good]).reshape(-1, 1, 2)
-        homography, mask = cv2.findHomography(source, target, cv2.RANSAC, 5.0)
-        if homography is None or mask is None:
-            return TemplateResult(
-                available=False,
-                issuer_id=issuer_id,
-                explanation="Template alignment was inconclusive and was not scored.",
-            )
-        aligned = cv2.warpPerspective(image, homography, (template.shape[1], template.shape[0]))
-        alignment = float(mask.ravel().mean())
+        detector_name, alignment, aligned = best_alignment
         regions = definition.get("regions", {})
         regions = regions if isinstance(regions, dict) else {}
         logo = _normalized_ssim(_crop(template, regions["logo"]), _crop(aligned, regions["logo"])) \
@@ -113,26 +143,87 @@ class TemplateAnalyzer:
             issuer_id=issuer_id,
             template_id=str(definition.get("id", definition["image"])),
             alignment_score=round(alignment, 3),
+            feature_detector=detector_name,
+            feature_match_scores=match_scores,
             logo_similarity=round(logo, 3) if logo is not None else None,
             font_shape_similarity=round(font, 3) if font is not None else None,
             layout_similarity=round(layout, 3),
             anomaly_score=round(anomaly, 3),
-            explanation="The upload was aligned to a configured reference and compared by logo, text shape, and layout.",
+            explanation=(
+                "The upload was aligned with ORB/SIFT/SURF where available, then compared "
+                "by SSIM over logo, text shape, and layout."
+            ),
         )
+
+    @staticmethod
+    def _feature_candidates() -> list[tuple[str, object, int]]:
+        candidates: list[tuple[str, object, int]] = [
+            ("ORB", cv2.ORB_create(nfeatures=3000), cv2.NORM_HAMMING)
+        ]
+        if hasattr(cv2, "SIFT_create"):
+            candidates.append(("SIFT", cv2.SIFT_create(nfeatures=3000), cv2.NORM_L2))
+        xfeatures = getattr(cv2, "xfeatures2d", None)
+        if xfeatures is not None and hasattr(xfeatures, "SURF_create"):
+            try:
+                candidates.append(("SURF", xfeatures.SURF_create(400), cv2.NORM_L2))
+            except cv2.error:
+                pass
+        return candidates
+
+    @staticmethod
+    def _align(
+        image: np.ndarray, template: np.ndarray, detector: object, norm: int
+    ) -> tuple[float, np.ndarray] | None:
+        keypoints_image, descriptors_image = detector.detectAndCompute(image, None)
+        keypoints_template, descriptors_template = detector.detectAndCompute(template, None)
+        if descriptors_image is None or descriptors_template is None:
+            return None
+        matches = cv2.BFMatcher(norm).knnMatch(descriptors_image, descriptors_template, k=2)
+        good = [
+            pair[0]
+            for pair in matches
+            if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance
+        ]
+        if len(good) < 8:
+            return None
+        source = np.float32([keypoints_image[item.queryIdx].pt for item in good]).reshape(-1, 1, 2)
+        target = np.float32([keypoints_template[item.trainIdx].pt for item in good]).reshape(-1, 1, 2)
+        homography, mask = cv2.findHomography(source, target, cv2.RANSAC, 5.0)
+        if homography is None or mask is None:
+            return None
+        aligned = cv2.warpPerspective(image, homography, (template.shape[1], template.shape[0]))
+        alignment = float(mask.ravel().mean())
+        return alignment, aligned
 
 
 class ProvenanceAnalyzer:
+    def __init__(self, forgery_model: ForgeryModel | None = None) -> None:
+        self.forgery_model = forgery_model
+
     def analyze(self, image: np.ndarray, source_path: Path) -> ProvenanceResult:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         moire = self._moire_score(gray)
         method, confidence = self._capture_method(gray, moire, source_path)
-        ela = None
-        copy_move = None
-        if method == "born-digital":
-            ela = self._ela_score(source_path)
-            copy_move = self._copy_move_score(gray)
+        ela = self._ela_score(source_path)
+        jpeg_grid = self._jpeg_grid_score(gray)
+        frequency = self._frequency_anomaly_score(gray)
+        font_subpixel = self._font_subpixel_score(image)
+        copy_move = self._copy_move_score(gray)
+        noiseprint = self._noiseprint_score(gray)
+        printer_pattern = self._printer_pattern_score(gray)
+        neural_score = None
+        neural_error = None
+        if self.forgery_model is not None:
+            try:
+                neural_score = self.forgery_model.predict(image)
+            except Exception as exc:
+                neural_error = f"{type(exc).__name__}: {exc}"
         flags = self._metadata_flags(source_path)
-        edit_scores = [score for score in (ela, copy_move) if score is not None]
+        edit_scores = [
+            score
+            for score in (ela, jpeg_grid, frequency, font_subpixel, copy_move)
+            if score is not None
+        ]
         digital_anomaly = float(np.mean(edit_scores)) if edit_scores else 0.0
         explanation = (
             f"Capture characteristics are most consistent with {method}. "
@@ -143,11 +234,92 @@ class ProvenanceAnalyzer:
             capture_confidence=round(confidence, 3),
             moire_score=round(moire, 3),
             ela_score=round(ela, 3) if ela is not None else None,
+            jpeg_grid_score=round(jpeg_grid, 3),
+            frequency_anomaly_score=round(frequency, 3),
+            font_subpixel_score=round(font_subpixel, 3),
             copy_move_score=round(copy_move, 3) if copy_move is not None else None,
+            noiseprint_score=round(noiseprint, 3),
+            printer_pattern_score=round(printer_pattern, 3),
+            neural_model_available=self.forgery_model is not None,
+            neural_model_name=(self.forgery_model.name if self.forgery_model else None),
+            neural_forgery_score=(round(neural_score, 3) if neural_score is not None else None),
+            neural_error=neural_error,
             metadata_flags=flags,
             digital_edit_anomaly=round(digital_anomaly, 3),
             explanation=explanation,
         )
+
+    @staticmethod
+    def _jpeg_grid_score(gray: np.ndarray) -> float:
+        image = gray.astype(np.float32)
+        vertical_boundaries = np.arange(8, image.shape[1], 8)
+        horizontal_boundaries = np.arange(8, image.shape[0], 8)
+        vertical = (
+            np.abs(image[:, vertical_boundaries] - image[:, vertical_boundaries - 1]).mean()
+            if vertical_boundaries.size
+            else 0
+        )
+        horizontal = (
+            np.abs(image[horizontal_boundaries, :] - image[horizontal_boundaries - 1, :]).mean()
+            if horizontal_boundaries.size
+            else 0
+        )
+        baseline_v = np.abs(np.diff(image, axis=1)).mean() + 1e-6 if image.shape[1] > 1 else 1
+        baseline_h = np.abs(np.diff(image, axis=0)).mean() + 1e-6 if image.shape[0] > 1 else 1
+        ratio = ((vertical / baseline_v) + (horizontal / baseline_h)) / 2
+        return float(np.clip(abs(ratio - 1) / 2, 0, 1))
+
+    @staticmethod
+    def _frequency_anomaly_score(gray: np.ndarray) -> float:
+        resized = cv2.resize(gray, (512, 512), interpolation=cv2.INTER_AREA).astype(np.float32)
+        spectrum = np.log1p(np.abs(np.fft.fftshift(np.fft.fft2(resized))))
+        height, width = spectrum.shape
+        yy, xx = np.ogrid[:height, :width]
+        radius = np.sqrt((xx - width / 2) ** 2 + (yy - height / 2) ** 2)
+        high = spectrum[(radius > 90) & (radius < 230)]
+        if not high.size:
+            return 0.0
+        median = np.median(high)
+        mad = np.median(np.abs(high - median)) + 1e-6
+        spikes = np.mean(high > median + 6 * mad)
+        return float(np.clip(spikes * 40, 0, 1))
+
+    @staticmethod
+    def _font_subpixel_score(image: np.ndarray) -> float:
+        channels = [channel.astype(np.float32) for channel in cv2.split(image)]
+        edge = cv2.Canny(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY), 80, 160) > 0
+        if edge.sum() < 50:
+            return 0.0
+        disagreement = (
+            np.abs(channels[0] - channels[1])
+            + np.abs(channels[1] - channels[2])
+            + np.abs(channels[0] - channels[2])
+        ) / 3
+        return float(np.clip(np.percentile(disagreement[edge], 90) / 64, 0, 1))
+
+    @staticmethod
+    def _noiseprint_score(gray: np.ndarray) -> float:
+        source = gray.astype(np.float32) / 255
+        residual = source - cv2.GaussianBlur(source, (0, 0), 1.2)
+        local_energy = cv2.GaussianBlur(residual * residual, (0, 0), 8)
+        mean = float(local_energy.mean())
+        if mean <= 1e-8:
+            return 0.0
+        coefficient_of_variation = float(local_energy.std() / mean)
+        return float(np.clip((coefficient_of_variation - 0.5) / 2.5, 0, 1))
+
+    @staticmethod
+    def _printer_pattern_score(gray: np.ndarray) -> float:
+        residual = gray.astype(np.float32) - cv2.GaussianBlur(
+            gray.astype(np.float32), (0, 0), 2
+        )
+        spectrum = np.abs(np.fft.fftshift(np.fft.fft2(residual)))
+        center_y, center_x = np.array(spectrum.shape) // 2
+        spectrum[center_y - 12:center_y + 13, center_x - 12:center_x + 13] = 0
+        median = float(np.median(spectrum))
+        mad = float(np.median(np.abs(spectrum - median))) + 1e-6
+        peaks = np.mean(spectrum > median + 10 * mad)
+        return float(np.clip(peaks * 100, 0, 1))
 
     @staticmethod
     def _moire_score(gray: np.ndarray) -> float:

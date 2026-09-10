@@ -15,7 +15,8 @@ VERIFICATION_RISK = {
     VerificationStatus.FAILED_LOOKUP: 0.95,
 }
 
-SCORABLE_WEIGHT = 0.93
+BASE_SCORABLE_WEIGHT = 0.93
+FORENSIC_MODEL_WEIGHT = 0.07
 
 
 def calculate_risk(
@@ -40,6 +41,28 @@ def calculate_risk(
         )
     if content.available and content.anomaly_score is not None:
         signals.append(("content_plausibility", content.anomaly_score, 0.03, content.explanation))
+    if provenance.neural_forgery_score is not None:
+        artifact_scores = [
+            score
+            for score in (
+                provenance.jpeg_grid_score,
+                provenance.frequency_anomaly_score,
+                provenance.font_subpixel_score,
+                provenance.digital_edit_anomaly,
+            )
+            if score is not None
+        ]
+        artifact_score = sum(artifact_scores) / len(artifact_scores) if artifact_scores else 0.0
+        forensic_score = 0.7 * provenance.neural_forgery_score + 0.3 * artifact_score
+        signals.append(
+            (
+                "forgery_model_consensus",
+                forensic_score,
+                FORENSIC_MODEL_WEIGHT,
+                "A configured neural model was combined with image-artifact signals; "
+                "this is triage evidence, not proof of origin.",
+            )
+        )
 
     contributions = [
         RiskContribution(
@@ -51,5 +74,7 @@ def calculate_risk(
         )
         for name, raw_risk, weight, explanation in signals
     ]
-    coverage = round(sum(weight for _, _, weight, _ in signals) / SCORABLE_WEIGHT, 3)
+    model_expected = provenance.neural_model_available
+    scorable_weight = BASE_SCORABLE_WEIGHT + (FORENSIC_MODEL_WEIGHT if model_expected else 0)
+    coverage = round(sum(weight for _, _, weight, _ in signals) / scorable_weight, 3)
     return round(sum(item.points for item in contributions), 1), coverage, contributions

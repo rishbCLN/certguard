@@ -10,7 +10,7 @@ from pathlib import Path
 from certguard.audit import JsonlAuditSink
 from certguard.content import analyze_content
 from certguard.document import extract_loaded_document, load_document_pages
-from certguard.forensics import ProvenanceAnalyzer, TemplateAnalyzer
+from certguard.forensics import ForgeryModel, ProvenanceAnalyzer, TemplateAnalyzer
 from certguard.models import (
     AnalysisReport,
     AuditCheck,
@@ -39,6 +39,7 @@ class CertGuardPipeline:
         network_enabled: bool = True,
         search_client: SearchClient | None = None,
         search_enabled: bool = False,
+        forgery_model: ForgeryModel | None = None,
         review_threshold: float = 55.0,
     ) -> None:
         if not 0 < review_threshold <= 100:
@@ -48,7 +49,7 @@ class CertGuardPipeline:
             self.registry, network_enabled=network_enabled
         )
         self.templates = TemplateAnalyzer(template_root)
-        self.provenance = ProvenanceAnalyzer()
+        self.provenance = ProvenanceAnalyzer(forgery_model)
         self.search_client = search_client
         self.search_enabled = search_enabled and network_enabled
         self.audit_sink = audit_sink
@@ -132,6 +133,8 @@ class CertGuardPipeline:
                     evidence={
                         "template_id": template.template_id,
                         "alignment_score": template.alignment_score,
+                        "feature_detector": template.feature_detector,
+                        "feature_match_scores": template.feature_match_scores,
                         "logo_similarity": template.logo_similarity,
                         "font_shape_similarity": template.font_shape_similarity,
                         "layout_similarity": template.layout_similarity,
@@ -160,7 +163,16 @@ class CertGuardPipeline:
                         "capture_confidence": provenance.capture_confidence,
                         "moire_score": provenance.moire_score,
                         "ela_score": provenance.ela_score,
+                        "jpeg_grid_score": provenance.jpeg_grid_score,
+                        "frequency_anomaly_score": provenance.frequency_anomaly_score,
+                        "font_subpixel_score": provenance.font_subpixel_score,
                         "copy_move_score": provenance.copy_move_score,
+                        "noiseprint_score": provenance.noiseprint_score,
+                        "printer_pattern_score": provenance.printer_pattern_score,
+                        "neural_model_available": provenance.neural_model_available,
+                        "neural_model_name": provenance.neural_model_name,
+                        "neural_forgery_score": provenance.neural_forgery_score,
+                        "neural_error": provenance.neural_error,
                         "metadata_flags": provenance.metadata_flags,
                     },
                     duration_ms=_elapsed_ms(started),
@@ -186,7 +198,7 @@ class CertGuardPipeline:
             verification, template, provenance, content
         )
         review_reasons = _review_reasons(
-            verification, template, coverage, risk_score, self.review_threshold
+            verification, template, provenance, coverage, risk_score, self.review_threshold
         )
         report = AnalysisReport(
             submission_id=submission_id,
@@ -198,11 +210,10 @@ class CertGuardPipeline:
             review_reasons=review_reasons,
             decision="human-review-triage-only",
             authenticity_assessment=_authenticity_assessment(verification, template),
-            ai_origin_assessment=(
-                "not-determined: visual style alone cannot reliably establish whether a certificate "
-                "was AI-generated; CertGuard checks issuer records and document consistency instead"
+            ai_origin_assessment=_ai_origin_assessment(provenance),
+            ruleset_fingerprint=_ruleset_fingerprint(
+                self.registry, self.provenance.forgery_model
             ),
-            ruleset_fingerprint=_ruleset_fingerprint(self.registry),
             extraction=extraction,
             search=search,
             verification=verification,
@@ -314,6 +325,7 @@ def _error_check(name: str, error: Exception, started: float) -> AuditCheck:
 def _review_reasons(
     verification: VerificationResult,
     template: TemplateResult,
+    provenance: ProvenanceResult,
     coverage: float,
     risk_score: float,
     review_threshold: float,
@@ -328,11 +340,29 @@ def _review_reasons(
         reasons.append("The certificate was not fully bound to a matching issuer record.")
     if template.available and template.anomaly_score is not None and template.anomaly_score >= 0.45:
         reasons.append("The layout differs substantially from a configured issuer reference.")
+    if (
+        provenance.neural_forgery_score is not None
+        and provenance.neural_forgery_score >= 0.75
+    ):
+        reasons.append("The configured forgery model returned a high-risk signal.")
     if coverage < 0.75:
         reasons.append("Evidence coverage is limited; manual verification is required.")
     if risk_score >= review_threshold and not reasons:
         reasons.append("The combined adverse evidence exceeds the review threshold.")
     return reasons
+
+
+def _ai_origin_assessment(provenance: ProvenanceResult) -> str:
+    score = provenance.neural_forgery_score
+    if not provenance.neural_model_available:
+        return "not-assessed: no trained forgery model was configured"
+    if score is None:
+        return "inconclusive: the configured forgery model did not produce a usable score"
+    if score >= 0.75:
+        return "model-signal-high: requires human and issuer-record verification"
+    if score >= 0.4:
+        return "model-signal-uncertain: not evidence of AI origin by itself"
+    return "model-signal-low: does not establish that the certificate is genuine"
 
 
 def _authenticity_assessment(
@@ -349,7 +379,9 @@ def _authenticity_assessment(
     return "inconclusive"
 
 
-def _ruleset_fingerprint(registry: IssuerRegistry) -> str:
+def _ruleset_fingerprint(
+    registry: IssuerRegistry, forgery_model: ForgeryModel | None = None
+) -> str:
     payload = []
     for issuer in sorted(registry.issuers.values(), key=lambda item: item.issuer_id):
         payload.append(
@@ -362,5 +394,16 @@ def _ruleset_fingerprint(registry: IssuerRegistry) -> str:
                 "templates": issuer.templates,
             }
         )
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ruleset = {
+        "issuers": payload,
+        "forgery_model": (
+            {
+                "name": forgery_model.name,
+                "fingerprint": getattr(forgery_model, "fingerprint", None),
+            }
+            if forgery_model
+            else None
+        ),
+    }
+    encoded = json.dumps(ruleset, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
