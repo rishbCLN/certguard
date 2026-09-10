@@ -221,9 +221,7 @@ def test_host_allowlist_does_not_implicitly_allow_subdomains() -> None:
 
 
 def test_discovered_official_url_is_fetched_before_rebuilt_endpoint() -> None:
-    client = RecordingClient(
-        "Credential valid Recipient: Alice Example Credential: Python Basics"
-    )
+    client = RecordingClient("Credential valid Recipient: Alice Example Credential: Python Basics")
     service = VerificationService(registry_with_claims(), client=client)
 
     result = service.verify(

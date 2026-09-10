@@ -30,6 +30,11 @@ class AlignmentContext:
     inlier_count: int
     match_count: int
     reprojection_error: float
+    source_dimensions: tuple[int, int] | None = None
+    template_dimensions: tuple[int, int] | None = None
+    inlier_ratio: float | None = None
+    detector_metadata: dict[str, float | int | str] | None = None
+    coordinate_system: str = "source-pixels-to-template-pixels"
 
 
 class OnnxForgeryModel:
@@ -42,9 +47,7 @@ class OnnxForgeryModel:
             import onnxruntime as ort
         except ImportError as exc:
             raise RuntimeError("ONNX inference requires the optional onnxruntime package") from exc
-        self._session = ort.InferenceSession(
-            str(model_path), providers=["CPUExecutionProvider"]
-        )
+        self._session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         self._input = self._session.get_inputs()[0]
 
     def predict(self, image: np.ndarray) -> float:
@@ -93,7 +96,7 @@ class TemplateAnalyzer:
             return TemplateResult(available=False, issuer_id=issuer.issuer_id if issuer else None)
 
         best: TemplateResult | None = None
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        gray = _as_gray(image)
         for definition in issuer.templates:
             root = self.template_root.resolve()
             path = (root / str(definition["image"])).resolve()
@@ -141,10 +144,16 @@ class TemplateAnalyzer:
         detector_name, alignment, aligned = best_alignment
         regions = definition.get("regions", {})
         regions = regions if isinstance(regions, dict) else {}
-        logo = _normalized_ssim(_crop(template, regions["logo"]), _crop(aligned, regions["logo"])) \
-            if "logo" in regions else None
-        font = _normalized_ssim(_crop(template, regions["text"]), _crop(aligned, regions["text"])) \
-            if "text" in regions else None
+        logo = (
+            _normalized_ssim(_crop(template, regions["logo"]), _crop(aligned, regions["logo"]))
+            if "logo" in regions
+            else None
+        )
+        font = (
+            _normalized_ssim(_crop(template, regions["text"]), _crop(aligned, regions["text"]))
+            if "text" in regions
+            else None
+        )
         template_edges = cv2.Canny(template, 80, 160)
         aligned_edges = cv2.Canny(aligned, 80, 160)
         layout = _normalized_ssim(template_edges, aligned_edges)
@@ -206,8 +215,10 @@ class TemplateAnalyzer:
         detector: object,
         norm: int,
     ) -> AlignmentContext | None:
-        keypoints_image, descriptors_image = detector.detectAndCompute(image, None)
-        keypoints_template, descriptors_template = detector.detectAndCompute(template, None)
+        image_gray = _as_gray(image)
+        template_gray = _as_gray(template)
+        keypoints_image, descriptors_image = detector.detectAndCompute(image_gray, None)
+        keypoints_template, descriptors_template = detector.detectAndCompute(template_gray, None)
         if descriptors_image is None or descriptors_template is None:
             return None
         matches = cv2.BFMatcher(norm).knnMatch(descriptors_image, descriptors_template, k=2)
@@ -219,7 +230,9 @@ class TemplateAnalyzer:
         if len(good) < 8:
             return None
         source = np.float32([keypoints_image[item.queryIdx].pt for item in good]).reshape(-1, 1, 2)
-        target = np.float32([keypoints_template[item.trainIdx].pt for item in good]).reshape(-1, 1, 2)
+        target = np.float32([keypoints_template[item.trainIdx].pt for item in good]).reshape(
+            -1, 1, 2
+        )
         homography, mask = cv2.findHomography(source, target, cv2.RANSAC, 5.0)
         if homography is None or mask is None:
             return None
@@ -237,7 +250,28 @@ class TemplateAnalyzer:
             inlier_count=int(inliers.sum()),
             match_count=len(good),
             reprojection_error=reprojection_error,
+            source_dimensions=(image.shape[1], image.shape[0]),
+            template_dimensions=(template.shape[1], template.shape[0]),
+            inlier_ratio=alignment,
+            detector_metadata={
+                "detector": name,
+                "source_keypoints": len(keypoints_image),
+                "template_keypoints": len(keypoints_template),
+                "candidate_matches": len(matches),
+                "ratio_test": 0.75,
+                "ransac_threshold_px": 5.0,
+            },
         )
+
+
+def _as_gray(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 2:
+        return image
+    if image.ndim == 3 and image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+    if image.ndim == 3 and image.shape[2] == 3:
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    raise ValueError("Alignment images must be grayscale, BGR, or BGRA")
 
 
 class ProvenanceAnalyzer:
@@ -354,12 +388,10 @@ class ProvenanceAnalyzer:
 
     @staticmethod
     def _printer_pattern_score(gray: np.ndarray) -> float:
-        residual = gray.astype(np.float32) - cv2.GaussianBlur(
-            gray.astype(np.float32), (0, 0), 2
-        )
+        residual = gray.astype(np.float32) - cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 2)
         spectrum = np.abs(np.fft.fftshift(np.fft.fft2(residual)))
         center_y, center_x = np.array(spectrum.shape) // 2
-        spectrum[center_y - 12:center_y + 13, center_x - 12:center_x + 13] = 0
+        spectrum[center_y - 12 : center_y + 13, center_x - 12 : center_x + 13] = 0
         median = float(np.median(spectrum))
         mad = float(np.median(np.abs(spectrum - median))) + 1e-6
         peaks = np.mean(spectrum > median + 10 * mad)
@@ -434,12 +466,19 @@ class ProvenanceAnalyzer:
             return []
         try:
             with Image.open(path) as image:
-                exif = {ExifTags.TAGS.get(key, str(key)): value for key, value in image.getexif().items()}
+                exif = {
+                    ExifTags.TAGS.get(key, str(key)): value
+                    for key, value in image.getexif().items()
+                }
             flags = []
             software = str(exif.get("Software", "")).casefold()
             if any(name in software for name in ("photoshop", "gimp", "affinity")):
                 flags.append("Metadata names image-editing software; this is weak evidence only.")
-            if "DateTimeOriginal" in exif and "DateTime" in exif and exif["DateTimeOriginal"] > exif["DateTime"]:
+            if (
+                "DateTimeOriginal" in exif
+                and "DateTime" in exif
+                and exif["DateTimeOriginal"] > exif["DateTime"]
+            ):
                 flags.append("Metadata timestamps are inconsistent.")
             return flags
         except (OSError, TypeError, ValueError):

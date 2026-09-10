@@ -19,7 +19,7 @@ class JsonlAuditSink:
         self._lock = threading.Lock()
 
     def append(self, report: AnalysisReport) -> None:
-        record = report.to_dict()
+        record = _redact_sensitive_fields(report.to_dict())
         extraction = record.get("extraction")
         if isinstance(extraction, dict):
             extraction["text"] = "[redacted from audit log]"
@@ -39,9 +39,7 @@ class JsonlAuditSink:
             verification["authoritative_claims"] = {}
             verification["claim_comparisons"] = {}
             verification["attempts"] = [
-                {key: value for key, value in attempt.items() if key != "url"}
-                for attempt in verification.get("attempts", [])
-                if isinstance(attempt, dict)
+                attempt for attempt in verification.get("attempts", []) if isinstance(attempt, dict)
             ]
         serialized = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
         try:
@@ -51,3 +49,71 @@ class JsonlAuditSink:
                     stream.write(serialized + "\n")
         except OSError as exc:
             raise AuditWriteError(f"Failed to append audit log {self.path}: {exc}") from exc
+
+
+_REDACTED = "[redacted from audit log]"
+_SENSITIVE_SCALAR_KEYS = {
+    "certificate_id",
+    "claim",
+    "claim_value",
+    "comparison",
+    "credential_title",
+    "expected_value",
+    "url",
+    "final_url",
+    "lookup_url",
+    "observed_value",
+    "query",
+    "qr_claim",
+    "qr_payload",
+    "qr_value",
+    "recipient",
+    "student_id",
+    "text",
+    "value",
+    "formatted_text",
+    "error",
+}
+_SENSITIVE_LIST_KEYS = {
+    "accepted_urls",
+    "certificate_ids",
+    "errors",
+    "pages",
+    "qr_claims",
+    "qr_payloads",
+    "qr_values",
+    "results",
+    "urls",
+}
+_SENSITIVE_MAPPING_KEYS = {
+    "authoritative_claims",
+    "claims",
+    "claim_comparisons",
+    "comparisons",
+    "structured_fields",
+}
+
+
+def _redact_sensitive_fields(value, key: str | None = None):  # noqa: ANN001, ANN202
+    """Remove private values recursively, including copies nested in check evidence."""
+    normalized_key = key.casefold() if isinstance(key, str) else None
+    if normalized_key in _SENSITIVE_SCALAR_KEYS or (
+        normalized_key is not None
+        and (
+            normalized_key.endswith("_error")
+            or normalized_key.endswith("_text")
+            or normalized_key.endswith("_url")
+        )
+    ):
+        return None if key == "query" else _REDACTED
+    if normalized_key in _SENSITIVE_LIST_KEYS:
+        return []
+    if normalized_key in _SENSITIVE_MAPPING_KEYS:
+        return {}
+    if isinstance(value, dict):
+        return {
+            item_key: _redact_sensitive_fields(item, item_key) for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive_fields(item) for item in value]
+    return value

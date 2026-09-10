@@ -27,16 +27,12 @@ def test_search_uses_id_and_official_domain_without_recipient_name() -> None:
         certificate_ids=["abc123def"],
     )
 
-    evidence = discover_official_pages(
-        extraction, IssuerRegistry.default(), client, enabled=True
-    )
+    evidence = discover_official_pages(extraction, IssuerRegistry.default(), client, enabled=True)
 
     assert '"abc123def"' in client.query
     assert "site:coderank.com" in client.query
     assert "Alice Private" not in client.query
-    assert evidence.accepted_urls == [
-        "https://www.coderank.com/certificates/abc123def"
-    ]
+    assert evidence.accepted_urls == ["https://www.coderank.com/certificates/abc123def"]
 
 
 def test_search_rejects_lookalike_and_non_verification_pages() -> None:
@@ -54,9 +50,7 @@ def test_search_rejects_lookalike_and_non_verification_pages() -> None:
         certificate_ids=["abc123def"],
     )
 
-    evidence = discover_official_pages(
-        extraction, IssuerRegistry.default(), client, enabled=True
-    )
+    evidence = discover_official_pages(extraction, IssuerRegistry.default(), client, enabled=True)
 
     assert evidence.accepted_urls == []
     assert not any(result.accepted for result in evidence.results)

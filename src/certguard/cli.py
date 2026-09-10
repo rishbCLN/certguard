@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from certguard.audit import JsonlAuditSink
@@ -45,7 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Expected course, assessment, or event title for issuer-record binding",
     )
     parser.add_argument(
-        "--offline", action="store_true", help="Extract candidates but do not contact issuer services"
+        "--offline",
+        action="store_true",
+        help="Extract candidates but do not contact issuer services",
     )
     parser.add_argument(
         "--search",
@@ -60,7 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--manifest",
         type=Path,
-        help="CSV binding filenames to student_id, expected_recipient, and expected_credential_title",
+        help=(
+            "CSV binding filenames to student_id, expected_recipient, and expected_credential_title"
+        ),
     )
     return parser
 
@@ -68,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "build-grammar":
         return build_grammar_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "benchmark":
+        return benchmark_main(sys.argv[2:])
     parser = build_parser()
     args = parser.parse_args()
     batch_requested = len(args.documents) > 1 or any(path.is_dir() for path in args.documents)
@@ -89,22 +96,27 @@ def main() -> int:
             parser.error("--search brave requires BRAVE_SEARCH_API_KEY")
         search_client = BraveSearchClient(api_key)
 
-    registry = IssuerRegistry.from_file(args.registry) if args.registry else IssuerRegistry.default()
+    registry = (
+        IssuerRegistry.from_file(args.registry) if args.registry else IssuerRegistry.default()
+    )
     audit_sink = JsonlAuditSink(args.audit_log) if args.audit_log else None
     try:
         forgery_model = OnnxForgeryModel(args.forgery_model) if args.forgery_model else None
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
-    pipeline = CertGuardPipeline(
-        registry=registry,
-        template_root=args.templates,
-        audit_sink=audit_sink,
-        network_enabled=not args.offline,
-        search_client=search_client,
-        search_enabled=bool(args.search),
-        forgery_model=forgery_model,
-        grammar_root=args.grammar_root,
-    )
+    try:
+        pipeline = CertGuardPipeline(
+            registry=registry,
+            template_root=args.templates,
+            audit_sink=audit_sink,
+            network_enabled=not args.offline,
+            search_client=search_client,
+            search_enabled=bool(args.search),
+            forgery_model=forgery_model,
+            grammar_root=args.grammar_root,
+        )
+    except GrammarProfileError as exc:
+        parser.error(str(exc))
     if batch_requested:
         manifest = load_manifest(args.manifest) if args.manifest else None
         result = BatchProcessor(pipeline).analyze(
@@ -126,7 +138,7 @@ def main() -> int:
         args.output.write_text(rendered, encoding="utf-8")
     else:
         print(rendered)
-    return 0
+    return 1 if batch_requested and getattr(result, "failed", 0) else 0
 
 
 def build_grammar_main(argv: list[str]) -> int:
@@ -153,6 +165,52 @@ def build_grammar_main(argv: list[str]) -> int:
         parser.error(str(exc))
     print(args.output)
     return 0
+
+
+def benchmark_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="certguard benchmark")
+    parser.add_argument("document", type=Path)
+    parser.add_argument("--iterations", type=int, default=3)
+    parser.add_argument("--grammar-root", type=Path)
+    args = parser.parse_args(argv)
+    if args.iterations < 1:
+        parser.error("--iterations must be at least 1")
+
+    try:
+        pipeline = CertGuardPipeline(grammar_root=args.grammar_root, network_enabled=False)
+    except GrammarProfileError as exc:
+        parser.error(str(exc))
+    durations: list[float] = []
+    ssdd_durations: list[int] = []
+    for _ in range(args.iterations):
+        started = time.perf_counter()
+        report = pipeline.analyze(args.document)
+        durations.append((time.perf_counter() - started) * 1000)
+        ssdd_check = next(
+            check for check in report.checks if check.name == "semantic_structural_dissonance"
+        )
+        ssdd_durations.append(ssdd_check.duration_ms)
+
+    output = {
+        "document": str(args.document.resolve()),
+        "iterations": args.iterations,
+        "end_to_end_ms": _latency_summary(durations),
+        "ssdd_ms": _latency_summary(ssdd_durations),
+        "threshold_enforced": False,
+    }
+    print(json.dumps(output, indent=2))
+    return 0
+
+
+def _latency_summary(values: list[float | int]) -> dict[str, float]:
+    ordered = sorted(float(value) for value in values)
+    percentile_index = min(len(ordered) - 1, max(0, round(0.95 * len(ordered) - 1)))
+    return {
+        "min": round(ordered[0], 3),
+        "median": round(ordered[len(ordered) // 2], 3),
+        "p95": round(ordered[percentile_index], 3),
+        "max": round(ordered[-1], 3),
+    }
 
 
 if __name__ == "__main__":

@@ -12,3 +12,20 @@ qr_bindings: []
 rendering: {}
 calibration:
   scoring_enabled: false
+annotation_requirements:
+  regions:
+  - title
+  - recipient
+  - issuer_logo
+  - verification_qr
+  planned_rules:
+  - type: region_presence
+    unit: boolean
+  - type: baseline_offset
+    unit: normalized
+  - type: relative_size
+    unit: ratio
+  activation_requires:
+  - rights-cleared canonical template
+  - normalized annotated region boxes and tolerances
+  - external template hash and profile HMAC

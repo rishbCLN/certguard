@@ -159,6 +159,8 @@ class SSDDResult:
     unavailable: list[str] = field(default_factory=list)
     scoring_enabled: bool = False
     risk_points: float = 0.0
+    applicable_profile: bool = False
+    required_binding_violations: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

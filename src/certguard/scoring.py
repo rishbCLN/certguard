@@ -38,9 +38,7 @@ def calculate_risk(
             )
         )
     if template.available and template.anomaly_score is not None:
-        signals.append(
-            ("template_layout", template.anomaly_score, 0.20, template.explanation)
-        )
+        signals.append(("template_layout", template.anomaly_score, 0.20, template.explanation))
     if content.available and content.anomaly_score is not None:
         signals.append(("content_plausibility", content.anomaly_score, 0.03, content.explanation))
     if provenance.neural_forgery_score is not None:
@@ -91,9 +89,10 @@ def calculate_risk(
     model_expected = provenance.neural_model_available
     scorable_weight = BASE_SCORABLE_WEIGHT + (FORENSIC_MODEL_WEIGHT if model_expected else 0)
     coverage = round(sum(weight for _, _, weight, _ in signals) / scorable_weight, 3)
-    if ssdd.status != "not-configured":
+    if ssdd.applicable_profile:
         achieved = 0.10 if ssdd.status == "completed" else 0.0
         coverage = round((coverage * scorable_weight + achieved) / (scorable_weight + 0.10), 3)
         if ssdd.status != "completed":
             coverage = min(coverage, 0.72)
-    return min(100.0, round(sum(item.points for item in contributions), 1)), coverage, contributions
+    score = round(sum(item.points for item in contributions), 1)
+    return min(100.0, max(0.0, score)), coverage, contributions

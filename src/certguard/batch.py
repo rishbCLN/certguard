@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from certguard.models import AnalysisReport
 from certguard.pipeline import CertGuardPipeline
@@ -88,6 +90,19 @@ class BatchProcessor:
         documents = discover_documents(sources, recursive=recursive)
         if not documents:
             raise ValueError("No supported certificate documents were found")
+        if manifest:
+            duplicate_names = sorted(
+                name
+                for name, count in Counter(
+                    document.name.casefold() for document in documents
+                ).items()
+                if count > 1
+            )
+            if duplicate_names:
+                raise ValueError(
+                    "Manifest matching is ambiguous for duplicate filenames: "
+                    + ", ".join(duplicate_names)
+                )
 
         items: list[BatchItem] = []
         verification_statuses: dict[str, int] = {}

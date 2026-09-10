@@ -4,9 +4,7 @@ from certguard.models import ContentResult, ExtractionResult
 from certguard.registry import IssuerDefinition
 
 
-def analyze_content(
-    extraction: ExtractionResult, issuer: IssuerDefinition | None
-) -> ContentResult:
+def analyze_content(extraction: ExtractionResult, issuer: IssuerDefinition | None) -> ContentResult:
     if (
         issuer is None
         or not issuer.language_phrases
@@ -23,7 +21,8 @@ def analyze_content(
         phrase_match_score=round(score, 3),
         anomaly_score=round(1 - score, 3),
         explanation=(
-            f"Matched {matches} of {len(issuer.language_phrases)} configured issuer-language phrases. "
+            f"Matched {matches} of {len(issuer.language_phrases)} configured "
+            "issuer-language phrases. "
             "Wording is treated only as supplementary evidence."
         ),
     )

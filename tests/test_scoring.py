@@ -1,6 +1,7 @@
 from certguard.models import (
     ContentResult,
     ProvenanceResult,
+    SSDDResult,
     TemplateResult,
     VerificationResult,
     VerificationStatus,
@@ -101,3 +102,22 @@ def test_configured_neural_model_is_combined_with_artifact_signals() -> None:
     assert forensic.raw_risk == 0.78
     assert score == 6.9
     assert coverage == 1.0
+
+
+def test_invalid_non_applicable_ssdd_does_not_change_coverage() -> None:
+    _, baseline, _ = calculate_risk(
+        verification(VerificationStatus.VERIFIED),
+        TemplateResult(available=False),
+        ProvenanceResult(),
+        ContentResult(available=False),
+    )
+
+    _, coverage, _ = calculate_risk(
+        verification(VerificationStatus.VERIFIED),
+        TemplateResult(available=False),
+        ProvenanceResult(),
+        ContentResult(available=False),
+        SSDDResult(status="profile-invalid", delta=None),
+    )
+
+    assert coverage == baseline

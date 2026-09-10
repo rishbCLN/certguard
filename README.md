@@ -57,6 +57,15 @@ The builder copies the immutable template into the grammar directory, records it
 the profile, and updates `.signatures.json`. Profiles default to shadow-mode evidence; numeric SSDD
 points require signed calibration metadata with `scoring_enabled: true`.
 
+Measure local CPU latency without enforcing a hardware-independent threshold:
+
+```powershell
+certguard benchmark certificate.pdf --iterations 10 --grammar-root issuer\grammar
+```
+
+The benchmark reports SSDD-check and end-to-end minimum, median, p95, and maximum durations. Use
+representative deployment hardware and documents before defining a latency acceptance gate.
+
 Enable live issuer lookup by omitting `--offline`. Public verification pages change over time, so their patterns and success/failure markers require monitored maintenance before production use.
 
 Optionally enable Brave text-search discovery. Certificate images, full OCR text, and recipient names are not sent to Brave; the query contains the recognized issuer, certificate ID, and configured official domains. Search results are evidence discovery only and cannot verify a certificate unless the resulting approved official page is fetched and its claims match.

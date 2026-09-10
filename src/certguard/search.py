@@ -72,7 +72,8 @@ def discover_official_pages(
         return SearchEvidence(
             enabled=True,
             explanation=(
-                "Online search was skipped because the certificate issuer was not uniquely recognized."
+                "Online search was skipped because the certificate issuer was not uniquely "
+                "recognized."
             ),
         )
     issuer = issuers[0]
@@ -81,7 +82,9 @@ def discover_official_pages(
         return SearchEvidence(
             enabled=True,
             issuer_id=issuer.issuer_id,
-            explanation="Online search was skipped because no certificate identifier was extracted.",
+            explanation=(
+                "Online search was skipped because no certificate identifier was extracted."
+            ),
         )
 
     query = _build_query(issuer, certificate_ids[0])
@@ -116,9 +119,7 @@ def discover_official_pages(
     )
 
 
-def _issuer_certificate_ids(
-    issuer: IssuerDefinition, extraction: ExtractionResult
-) -> list[str]:
+def _issuer_certificate_ids(issuer: IssuerDefinition, extraction: ExtractionResult) -> list[str]:
     source = "\n".join([extraction.text, *extraction.urls, *extraction.qr_values])
     ids = [
         match.group(1)
@@ -146,8 +147,7 @@ def _is_official_verification_url(url: str, issuer: IssuerDefinition) -> bool:
     ):
         return False
     return any(
-        re.fullmatch(pattern, url, re.IGNORECASE)
-        for pattern in issuer.verification_url_patterns
+        re.fullmatch(pattern, url, re.IGNORECASE) for pattern in issuer.verification_url_patterns
     )
 
 

@@ -15,7 +15,6 @@ from certguard.models import (
     AnalysisReport,
     AuditCheck,
     CheckState,
-    ContentResult,
     ExtractionResult,
     ProvenanceResult,
     SearchEvidence,
@@ -48,19 +47,13 @@ class CertGuardPipeline:
         if not 0 < review_threshold <= 100:
             raise ValueError("review_threshold must be within (0, 100]")
         self.registry = registry or IssuerRegistry.default()
-        self.verification = VerificationService(
-            self.registry, network_enabled=network_enabled
-        )
+        self.verification = VerificationService(self.registry, network_enabled=network_enabled)
         self.templates = TemplateAnalyzer(template_root)
         self.provenance = ProvenanceAnalyzer(forgery_model)
         self.grammar_root = grammar_root
         self.grammar: GrammarStore | None = None
-        self.grammar_error: GrammarProfileError | None = None
         if grammar_root is not None:
-            try:
-                self.grammar = GrammarStore.from_environment(grammar_root)
-            except GrammarProfileError as exc:
-                self.grammar_error = exc
+            self.grammar = GrammarStore.from_environment(grammar_root)
         self.search_client = search_client
         self.search_enabled = search_enabled and network_enabled
         self.audit_sink = audit_sink
@@ -77,11 +70,11 @@ class CertGuardPipeline:
         if not source_path.is_file():
             raise FileNotFoundError(source_path)
         submission_id = submission_id or str(uuid.uuid4())
-        source_hash = _sha256(source_path)
         checks: list[AuditCheck] = []
 
         started = time.perf_counter()
         document = load_document_pages(source_path)
+        source_hash = _sha256(source_path)
         image = document.images[0]
         checks.append(
             AuditCheck(
@@ -207,8 +200,6 @@ class CertGuardPipeline:
 
         started = time.perf_counter()
         try:
-            if self.grammar_error is not None:
-                raise self.grammar_error
             ssdd_run = run_ssdd(
                 self.grammar or GrammarStore(), verification.issuer_id, document, extraction
             )
@@ -230,24 +221,41 @@ class CertGuardPipeline:
                         "checks_evaluated": ssdd.checks_evaluated,
                         "unavailable": ssdd.unavailable,
                         "model_sha256": ssdd.model_sha256,
+                        "profile": (
+                            {
+                                "issuer_id": ssdd.profile.issuer_id,
+                                "variant_id": ssdd.profile.variant_id,
+                                "version": ssdd.profile.version,
+                            }
+                            if ssdd.profile
+                            else None
+                        ),
                     },
                     duration_ms=_elapsed_ms(started),
                 )
             )
         except GrammarProfileError as exc:
+            applicable_profile = bool(
+                self.grammar and self.grammar.active_for(verification.issuer_id)
+            )
             ssdd = SSDDResult(
                 status="profile-invalid",
                 delta=None,
                 issuer_grammar_match=None,
                 unavailable=["profile-validation-failed"],
+                applicable_profile=applicable_profile,
             )
             checks.append(_error_check("semantic_structural_dissonance", exc, started))
         except Exception as exc:
+            applicable_profile = bool(
+                self.grammar and self.grammar.active_for(verification.issuer_id)
+            )
             ssdd = SSDDResult(
                 status="error",
                 delta=None,
                 issuer_grammar_match=None,
                 unavailable=["ssdd-operational-error"],
+                applicable_profile=applicable_profile,
             )
             checks.append(_error_check("semantic_structural_dissonance", exc, started))
 
@@ -285,9 +293,7 @@ class CertGuardPipeline:
             self.audit_sink.append(report)
         return report
 
-    def _search(
-        self, extraction: ExtractionResult, checks: list[AuditCheck]
-    ) -> SearchEvidence:
+    def _search(self, extraction: ExtractionResult, checks: list[AuditCheck]) -> SearchEvidence:
         started = time.perf_counter()
         result = discover_official_pages(
             extraction,
@@ -399,14 +405,15 @@ def _review_reasons(
         reasons.append("The certificate was not fully bound to a matching issuer record.")
     if template.available and template.anomaly_score is not None and template.anomaly_score >= 0.45:
         reasons.append("The layout differs substantially from a configured issuer reference.")
-    if (
-        provenance.neural_forgery_score is not None
-        and provenance.neural_forgery_score >= 0.75
-    ):
+    if provenance.neural_forgery_score is not None and provenance.neural_forgery_score >= 0.75:
         reasons.append("The configured forgery model returned a high-risk signal.")
-    if ssdd.status in {"insufficient-evidence", "profile-invalid", "error"}:
+    if ssdd.applicable_profile and ssdd.status in {
+        "insufficient-evidence",
+        "profile-invalid",
+        "error",
+    }:
         reasons.append("Issuer grammar evidence was unavailable or incomplete.")
-    elif ssdd.status == "completed" and "text-qr-binding-failure" in ssdd.violations:
+    elif ssdd.status == "completed" and ssdd.required_binding_violations:
         reasons.append("Certificate text did not match configured trusted QR claims.")
     if coverage < 0.75:
         reasons.append("Evidence coverage is limited; manual verification is required.")
@@ -428,9 +435,7 @@ def _ai_origin_assessment(provenance: ProvenanceResult) -> str:
     return "model-signal-low: does not establish that the certificate is genuine"
 
 
-def _authenticity_assessment(
-    verification: VerificationResult, template: TemplateResult
-) -> str:
+def _authenticity_assessment(verification: VerificationResult, template: TemplateResult) -> str:
     if verification.status == VerificationStatus.CLAIMS_MISMATCH:
         return "issuer-record-mismatch"
     if verification.status == VerificationStatus.FAILED_LOOKUP:
@@ -455,7 +460,20 @@ def _ruleset_fingerprint(
                 "urls": issuer.verification_url_patterns,
                 "official_domains": issuer.official_domains,
                 "ids": issuer.certificate_id_patterns,
-                "endpoints": [endpoint.url_template for endpoint in issuer.endpoints],
+                "aliases": issuer.aliases,
+                "allowed_hosts": issuer.allowed_hosts,
+                "language_phrases": issuer.language_phrases,
+                "endpoints": [
+                    {
+                        "url_template": endpoint.url_template,
+                        "allowed_hosts": endpoint.allowed_hosts,
+                        "success_markers": endpoint.success_markers,
+                        "failure_markers": endpoint.failure_markers,
+                        "recipient_patterns": endpoint.recipient_patterns,
+                        "credential_patterns": endpoint.credential_patterns,
+                    }
+                    for endpoint in issuer.endpoints
+                ],
                 "templates": issuer.templates,
             }
         )

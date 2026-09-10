@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +85,7 @@ MAX_SOURCE_BYTES = 50 * 1024 * 1024
 MAX_PDF_PAGES = 20
 MAX_RENDER_DPI = 400
 MAX_IMAGE_PIXELS = 30_000_000
+MAX_TOTAL_RENDERED_PIXELS = 100_000_000
 OCR_TIMEOUT_SECONDS = 60
 
 
@@ -108,12 +110,33 @@ class TextSpan:
     baseline: float | None = None
     font_name: str | None = None
     font_size: float | None = None
+    line_box: tuple[float, float, float, float] | None = None
+    coordinate_system: str = "normalized-page"
 
 
 @dataclass(slots=True)
 class QRObservation:
     value: str
     polygon: tuple[tuple[float, float], ...]
+    coordinate_system: str = "normalized-page"
+
+
+@dataclass(slots=True)
+class EmbeddedRasterPlacement:
+    box: tuple[float, float, float, float]
+    width_px: int
+    height_px: int
+    effective_dpi_x: float
+    effective_dpi_y: float
+    xref: int | None = None
+    coordinate_system: str = "normalized-page"
+
+
+@dataclass(slots=True)
+class VectorDrawingEvidence:
+    box: tuple[float, float, float, float]
+    coverage: float
+    coordinate_system: str = "normalized-page"
 
 
 @dataclass(slots=True)
@@ -127,6 +150,11 @@ class PageEvidence:
     qr_observations: list[QRObservation] | None = None
     vector_drawing_count: int = 0
     embedded_image_dpi: list[float] | None = None
+    embedded_rasters: list[EmbeddedRasterPlacement] | None = None
+    vector_drawings: list[VectorDrawingEvidence] | None = None
+    vector_coverage: float = 0.0
+    pdf_metadata: dict[str, str] | None = None
+    coordinate_system: str = "normalized-page"
 
     def __post_init__(self) -> None:
         if self.text_spans is None:
@@ -135,6 +163,12 @@ class PageEvidence:
             self.qr_observations = []
         if self.embedded_image_dpi is None:
             self.embedded_image_dpi = []
+        if self.embedded_rasters is None:
+            self.embedded_rasters = []
+        if self.vector_drawings is None:
+            self.vector_drawings = []
+        if self.pdf_metadata is None:
+            self.pdf_metadata = {}
 
 
 def load_document(path: Path, dpi: int = 200) -> tuple[np.ndarray, int]:
@@ -168,6 +202,8 @@ def load_document_pages(
                 images: list[np.ndarray] = []
                 native_texts: list[str] = []
                 evidence: list[PageEvidence] = []
+                total_pixels = 0
+                pdf_metadata = _bounded_pdf_metadata(getattr(document, "metadata", None))
                 page_indexes = range(document.page_count) if render_all_pages else range(1)
                 for page_index in page_indexes:
                     page = document[page_index]
@@ -178,9 +214,12 @@ def load_document_pages(
                         raise DocumentTooLargeError(
                             "Rendered page dimensions exceed the maximum supported pixel budget"
                         )
-                    pixmap = page.get_pixmap(
-                        matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False
-                    )
+                    total_pixels += math.ceil(width) * math.ceil(height)
+                    if total_pixels > MAX_TOTAL_RENDERED_PIXELS:
+                        raise DocumentTooLargeError(
+                            "PDF exceeds the maximum aggregate rendered pixel budget"
+                        )
+                    pixmap = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
                     pixels = pixmap.width * pixmap.height
                     if pixels > MAX_IMAGE_PIXELS:
                         raise DocumentTooLargeError(
@@ -194,6 +233,8 @@ def load_document_pages(
                     native_texts.append(get_text("text").strip() if get_text else "")
                     spans = _pdf_text_spans(page)
                     drawings = getattr(page, "get_drawings", lambda: [])()
+                    embedded_rasters = _pdf_image_placements(page)
+                    vector_drawings = _pdf_vector_drawings(page, drawings)
                     evidence.append(
                         PageEvidence(
                             page_number=page_index + 1,
@@ -203,7 +244,19 @@ def load_document_pages(
                             height_pt=float(page.rect.height),
                             text_spans=spans,
                             vector_drawing_count=len(drawings),
-                            embedded_image_dpi=_pdf_image_dpi(page),
+                            embedded_image_dpi=[
+                                round(
+                                    (placement.effective_dpi_x + placement.effective_dpi_y) / 2,
+                                    3,
+                                )
+                                for placement in embedded_rasters
+                            ],
+                            embedded_rasters=embedded_rasters,
+                            vector_drawings=vector_drawings,
+                            vector_coverage=_box_union_area(
+                                [drawing.box for drawing in vector_drawings]
+                            ),
+                            pdf_metadata=dict(pdf_metadata),
                         )
                     )
                 return LoadedDocument(images, native_texts, document.page_count, evidence)
@@ -211,13 +264,18 @@ def load_document_pages(
             raise
         except (fitz.FileDataError, OSError, RuntimeError) as exc:
             raise ValueError(f"Unsupported or unreadable PDF: {path}") from exc
+    try:
+        with Image.open(path) as source_image:
+            width, height = source_image.size
+    except (OSError, ValueError):
+        width = height = 0
+    if width * height > MAX_IMAGE_PIXELS:
+        raise DocumentTooLargeError("Image dimensions exceed the maximum supported pixel budget")
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"Unsupported or unreadable document: {path}")
     if image.shape[0] * image.shape[1] > MAX_IMAGE_PIXELS:
-        raise DocumentTooLargeError(
-            "Image dimensions exceed the maximum supported pixel budget"
-        )
+        raise DocumentTooLargeError("Image dimensions exceed the maximum supported pixel budget")
     return LoadedDocument(
         [image],
         [""],
@@ -238,16 +296,14 @@ def extract_document(
     ocr_text = ""
     confidence: float | None = None
     ocr_spans: list[TextSpan] = []
-    if not native_text.strip():
+    if _native_text_is_sparse(native_text):
         try:
             import pytesseract
 
             ocr_text, confidence, ocr_spans = _run_ocr(image, pytesseract)
             if confidence is not None and confidence < 0.55:
                 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-                prepared = cv2.threshold(
-                    gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-                )[1]
+                prepared = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
                 retry_text, retry_confidence, retry_spans = _run_ocr(prepared, pytesseract)
                 if retry_confidence is not None and retry_confidence > confidence:
                     ocr_text, confidence, ocr_spans = retry_text, retry_confidence, retry_spans
@@ -263,8 +319,7 @@ def extract_document(
         errors.append(f"QR decode failed: {exc}")
 
     normalized_native = _normalize_text_layout(native_text)
-    text_parts = [value for value in (normalized_native, ocr_text) if value]
-    text = "\n".join(dict.fromkeys(text_parts))
+    text = _merge_extracted_text(normalized_native, ocr_text)
     combined = "\n".join([text, *qr_values])
     urls = _extract_urls(combined)
     certificate_ids = _extract_certificate_ids(combined, qr_values)
@@ -321,9 +376,7 @@ def extract_loaded_document(document: LoadedDocument) -> ExtractionResult:
     qr_values = [value for result in page_results for value in result.qr_values]
     combined = "\n".join([text, *qr_values])
     confidences = [
-        result.ocr_confidence
-        for result in page_results
-        if result.ocr_confidence is not None
+        result.ocr_confidence for result in page_results if result.ocr_confidence is not None
     ]
     certificate_ids = _extract_certificate_ids(combined, qr_values)
     structured_fields = _extract_structured_fields(text, certificate_ids)
@@ -341,11 +394,11 @@ def extract_loaded_document(document: LoadedDocument) -> ExtractionResult:
     )
 
 
-def _run_ocr(
-    image: np.ndarray, pytesseract
-) -> tuple[str, float | None, list[TextSpan]]:  # noqa: ANN001
-    rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB) if image.ndim == 2 else cv2.cvtColor(
-        image, cv2.COLOR_BGR2RGB
+def _run_ocr(image: np.ndarray, pytesseract) -> tuple[str, float | None, list[TextSpan]]:  # noqa: ANN001
+    rgb = (
+        cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        if image.ndim == 2
+        else cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     )
     data = pytesseract.image_to_data(
         Image.fromarray(rgb),
@@ -366,6 +419,11 @@ def _ocr_text_spans(data: dict, shape: tuple[int, ...]) -> list[TextSpan]:
         return []
     height_px, width_px = shape[:2]
     spans: list[TextSpan] = []
+    line_columns = ("page_num", "block_num", "par_num", "line_num")
+    has_line_data = all(
+        column in data and len(data[column]) == len(data["text"]) for column in line_columns
+    )
+    line_members: dict[tuple[object, ...], list[int]] = {}
     for index, raw_text in enumerate(data["text"]):
         text = str(raw_text).strip()
         if not text:
@@ -384,6 +442,18 @@ def _ocr_text_spans(data: dict, shape: tuple[int, ...]) -> list[TextSpan]:
                 baseline=top + height,
             )
         )
+        if has_line_data:
+            key = tuple(data[column][index] for column in line_columns)
+            line_members.setdefault(key, []).append(len(spans) - 1)
+    for members in line_members.values():
+        x0 = min(spans[index].box[0] for index in members)
+        y0 = min(spans[index].box[1] for index in members)
+        x1 = max(spans[index].box[0] + spans[index].box[2] for index in members)
+        y1 = max(spans[index].box[1] + spans[index].box[3] for index in members)
+        line_box = (x0, y0, x1 - x0, y1 - y0)
+        for index in members:
+            spans[index].line_box = line_box
+            spans[index].baseline = y1
     return spans
 
 
@@ -400,53 +470,187 @@ def _pdf_text_spans(page) -> list[TextSpan]:  # noqa: ANN001
     spans: list[TextSpan] = []
     for block in payload.get("blocks", []):
         for line in block.get("lines", []):
+            line_box = _normalized_pdf_box(line.get("bbox"), width, height)
             for span in line.get("spans", []):
                 text = str(span.get("text", "")).strip()
                 box = span.get("bbox")
                 if not text or not isinstance(box, list | tuple) or len(box) != 4:
                     continue
                 x0, y0, x1, y1 = (float(value) for value in box)
+                normalized_box = _normalized_pdf_box(box, width, height)
+                if normalized_box is None:
+                    continue
+                origin = span.get("origin")
+                baseline = (
+                    float(origin[1]) / height
+                    if isinstance(origin, list | tuple) and len(origin) == 2
+                    else y1 / height
+                )
                 spans.append(
                     TextSpan(
                         text=text,
-                        box=(x0 / width, y0 / height, (x1 - x0) / width, (y1 - y0) / height),
+                        box=normalized_box,
                         source="native-pdf",
-                        baseline=y1 / height,
+                        baseline=baseline,
                         font_name=str(span.get("font")) if span.get("font") else None,
                         font_size=float(span["size"]) if span.get("size") else None,
+                        line_box=line_box,
                     )
                 )
     return spans
 
 
-def _pdf_image_dpi(page) -> list[float]:  # noqa: ANN001
-    values: list[float] = []
+def _pdf_image_placements(page) -> list[EmbeddedRasterPlacement]:  # noqa: ANN001
+    placements: list[EmbeddedRasterPlacement] = []
     get_images = getattr(page, "get_images", None)
     get_rects = getattr(page, "get_image_rects", None)
     if get_images is None or get_rects is None:
-        return values
+        return placements
+    page_width = float(page.rect.width)
+    page_height = float(page.rect.height)
     for image in get_images(full=True):
         if len(image) < 4:
             continue
         xref, width_px, height_px = image[0], image[2], image[3]
-        for rect in get_rects(xref):
+        try:
+            rects = get_rects(xref)
+        except (RuntimeError, ValueError):
+            continue
+        for rect in rects:
             if rect.width > 0 and rect.height > 0:
                 dpi_x = float(width_px) / (float(rect.width) / 72)
                 dpi_y = float(height_px) / (float(rect.height) / 72)
-                values.append(round((dpi_x + dpi_y) / 2, 3))
-    return values
+                box = _normalized_pdf_box(
+                    (rect.x0, rect.y0, rect.x1, rect.y1), page_width, page_height
+                )
+                if box is not None:
+                    placements.append(
+                        EmbeddedRasterPlacement(
+                            box=box,
+                            width_px=int(width_px),
+                            height_px=int(height_px),
+                            effective_dpi_x=round(dpi_x, 3),
+                            effective_dpi_y=round(dpi_y, 3),
+                            xref=int(xref),
+                        )
+                    )
+    return placements
+
+
+def _pdf_image_dpi(page) -> list[float]:  # noqa: ANN001
+    return [
+        round((item.effective_dpi_x + item.effective_dpi_y) / 2, 3)
+        for item in _pdf_image_placements(page)
+    ]
+
+
+def _pdf_vector_drawings(page, drawings: list[object]) -> list[VectorDrawingEvidence]:  # noqa: ANN001
+    width = float(page.rect.width)
+    height = float(page.rect.height)
+    evidence: list[VectorDrawingEvidence] = []
+    for drawing in drawings:
+        rect = drawing.get("rect") if isinstance(drawing, dict) else None
+        if rect is None:
+            continue
+        values = (
+            (rect.x0, rect.y0, rect.x1, rect.y1)
+            if all(hasattr(rect, name) for name in ("x0", "y0", "x1", "y1"))
+            else rect
+        )
+        box = _normalized_pdf_box(values, width, height)
+        if box is not None:
+            evidence.append(VectorDrawingEvidence(box, box[2] * box[3]))
+    return evidence
+
+
+def _normalized_pdf_box(
+    raw_box: object, width: float, height: float
+) -> tuple[float, float, float, float] | None:
+    if not isinstance(raw_box, list | tuple) or len(raw_box) != 4 or width <= 0 or height <= 0:
+        return None
+    x0, y0, x1, y1 = (float(value) for value in raw_box)
+    x0, x1 = sorted((float(np.clip(x0 / width, 0, 1)), float(np.clip(x1 / width, 0, 1))))
+    y0, y1 = sorted((float(np.clip(y0 / height, 0, 1)), float(np.clip(y1 / height, 0, 1))))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def _box_union_area(boxes: list[tuple[float, float, float, float]]) -> float:
+    edges = sorted({x for box in boxes for x in (box[0], box[0] + box[2])})
+    area = 0.0
+    for left, right in zip(edges, edges[1:], strict=False):
+        intervals = sorted(
+            (y, y + height) for x, y, width, height in boxes if x < right and x + width > left
+        )
+        covered = 0.0
+        if intervals:
+            start, end = intervals[0]
+            for next_start, next_end in intervals[1:]:
+                if next_start > end:
+                    covered += end - start
+                    start, end = next_start, next_end
+                else:
+                    end = max(end, next_end)
+            covered += end - start
+        area += (right - left) * covered
+    return round(float(np.clip(area, 0, 1)), 6)
+
+
+def _bounded_pdf_metadata(raw_metadata: object) -> dict[str, str]:
+    if not isinstance(raw_metadata, dict):
+        return {}
+    allowed = ("format", "encryption", "producer", "creator", "creationDate", "modDate")
+    return {
+        key: str(raw_metadata[key])[:256]
+        for key in allowed
+        if raw_metadata.get(key) not in (None, "")
+    }
 
 
 def _merge_text_spans(native: list[TextSpan], ocr: list[TextSpan]) -> list[TextSpan]:
     merged = list(native)
     for candidate in ocr:
         if not any(
-            existing.text.casefold() == candidate.text.casefold()
+            _span_text_matches(existing.text, candidate.text)
             and _box_overlap(existing.box, candidate.box) > 0.7
-            for existing in native
+            for existing in merged
         ):
             merged.append(candidate)
     return merged
+
+
+def _span_text_matches(left: str, right: str) -> bool:
+    left_normalized = " ".join(left.casefold().split())
+    right_normalized = " ".join(right.casefold().split())
+    if not left_normalized or not right_normalized:
+        return False
+    return left_normalized == right_normalized or (
+        len(right_normalized) >= 3
+        and re.search(rf"(?<!\w){re.escape(right_normalized)}(?!\w)", left_normalized) is not None
+    )
+
+
+def _native_text_is_sparse(text: str) -> bool:
+    normalized = _normalize_text_layout(text)
+    words = re.findall(r"\w+", normalized)
+    return len(words) < 6 or sum(char.isalnum() for char in normalized) < 32
+
+
+def _merge_extracted_text(native_text: str, ocr_text: str) -> str:
+    if not native_text:
+        return ocr_text
+    if not ocr_text:
+        return native_text
+    native_lines = native_text.splitlines()
+    normalized_native = {" ".join(line.casefold().split()) for line in native_lines}
+    additional = []
+    for line in ocr_text.splitlines():
+        normalized = " ".join(line.casefold().split())
+        if normalized and normalized not in normalized_native:
+            additional.append(line)
+            normalized_native.add(normalized)
+    return "\n".join([*native_lines, *additional])
 
 
 def _box_overlap(
@@ -463,8 +667,7 @@ def _box_overlap(
 def _text_from_ocr_data(data: dict, words: list[str]) -> str:
     line_columns = ("page_num", "block_num", "par_num", "line_num")
     has_line_data = all(
-        column in data and len(data[column]) == len(data["text"])
-        for column in line_columns
+        column in data and len(data[column]) == len(data["text"]) for column in line_columns
     )
     if not has_line_data:
         return " ".join(words)
@@ -568,7 +771,10 @@ def _qr_observations(decoded, points, shape: tuple[int, ...]) -> list[QRObservat
         polygon: tuple[tuple[float, float], ...] = ()
         if index < len(point_sets):
             polygon = tuple(
-                (float(point[0]) / width, float(point[1]) / height)
+                (
+                    float(np.clip(float(point[0]) / width, 0, 1)),
+                    float(np.clip(float(point[1]) / height, 0, 1)),
+                )
                 for point in point_sets[index]
             )
         observations.append(QRObservation(value, polygon))

@@ -107,7 +107,10 @@ class VerificationService:
                 status=VerificationStatus.UNRECOGNIZED_ISSUER,
                 issuer_id=None,
                 issuer_name=None,
-                explanation="The issuer did not match the configured registry; no authenticity conclusion was made.",
+                explanation=(
+                    "The issuer did not match the configured registry; no authenticity "
+                    "conclusion was made."
+                ),
             )
 
         if len(issuers) > 1:
@@ -115,7 +118,10 @@ class VerificationService:
                 status=VerificationStatus.AMBIGUOUS_ISSUER,
                 issuer_id=None,
                 issuer_name=None,
-                explanation="Conflicting issuer evidence was found; no automated issuer lookup was selected.",
+                explanation=(
+                    "Conflicting issuer evidence was found; no automated issuer lookup was "
+                    "selected."
+                ),
             )
 
         issuer = issuers[0]
@@ -127,7 +133,9 @@ class VerificationService:
             if endpoint is not None:
                 candidates.append((url, endpoint))
         for certificate_id in ids:
-            candidates.extend((endpoint.build_url(certificate_id), endpoint) for endpoint in issuer.endpoints)
+            candidates.extend(
+                (endpoint.build_url(certificate_id), endpoint) for endpoint in issuer.endpoints
+            )
 
         unique_candidates = list(dict.fromkeys((url, endpoint) for url, endpoint in candidates))
         if not unique_candidates:
@@ -141,9 +149,11 @@ class VerificationService:
                 issuer_id=issuer.issuer_id,
                 issuer_name=issuer.display_name,
                 explanation=(
-                    "A recognized issuer URL was found, but no configured authoritative response parser is available."
+                    "A recognized issuer URL was found, but no configured authoritative "
+                    "response parser is available."
                     if status == VerificationStatus.LOOKUP_INCONCLUSIVE
-                    else "The issuer was recognized, but no usable verification URL or certificate code was found."
+                    else "The issuer was recognized, but no usable verification URL or "
+                    "certificate code was found."
                 ),
             )
         if not self.network_enabled:
@@ -152,7 +162,9 @@ class VerificationService:
                 issuer_id=issuer.issuer_id,
                 issuer_name=issuer.display_name,
                 explanation="Verification candidates were found, but network lookup was disabled.",
-                attempts=[{"url": url, "outcome": "network-disabled"} for url, _ in unique_candidates],
+                attempts=[
+                    {"url": url, "outcome": "network-disabled"} for url, _ in unique_candidates
+                ],
             )
 
         attempts: list[dict[str, object]] = []
@@ -202,9 +214,7 @@ class VerificationService:
                     )
                 else:
                     saw_operational_error = True
-                    attempts.append(
-                        {"url": url, "status_code": exc.code, "outcome": "http-error"}
-                    )
+                    attempts.append({"url": url, "status_code": exc.code, "outcome": "http-error"})
             except (URLError, TimeoutError, ValueError, UnsafeRedirectError, OSError) as exc:
                 saw_operational_error = True
                 attempts.append(
@@ -285,9 +295,7 @@ class VerificationService:
         )
 
     @staticmethod
-    def _endpoint_for_url(
-        issuer: IssuerDefinition, url: str
-    ) -> VerificationEndpoint | None:
+    def _endpoint_for_url(issuer: IssuerDefinition, url: str) -> VerificationEndpoint | None:
         hostname = urlparse(url).hostname
         for endpoint in issuer.endpoints:
             if _host_allowed(hostname, set(endpoint.allowed_hosts)):
@@ -301,7 +309,10 @@ class VerificationService:
                 value
                 for value in values
                 if urlparse(value).scheme.casefold() == "https"
-                and any(re.fullmatch(pattern, value, re.IGNORECASE) for pattern in issuer.verification_url_patterns)
+                and any(
+                    re.fullmatch(pattern, value, re.IGNORECASE)
+                    for pattern in issuer.verification_url_patterns
+                )
             )
         )
 
@@ -317,9 +328,7 @@ class VerificationService:
         return list(dict.fromkeys(ids))[:5]
 
     @staticmethod
-    def _extract_authoritative_claims(
-        body: str, endpoint: VerificationEndpoint
-    ) -> dict[str, str]:
+    def _extract_authoritative_claims(body: str, endpoint: VerificationEndpoint) -> dict[str, str]:
         text = unescape(body)
         claims: dict[str, str] = {}
         for field, patterns in (
@@ -353,11 +362,7 @@ class VerificationService:
     def _supplied_claims(submitted: SubmissionClaims | None) -> list[str]:
         if submitted is None:
             return []
-        return [
-            field
-            for field in ("recipient", "credential_title")
-            if getattr(submitted, field)
-        ]
+        return [field for field in ("recipient", "credential_title") if getattr(submitted, field)]
 
     @staticmethod
     def _normalize_claim(value: str) -> str:

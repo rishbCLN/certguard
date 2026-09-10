@@ -11,6 +11,7 @@ import certguard.cli as cli
 class Result:
     def __init__(self, mode: str) -> None:
         self.mode = mode
+        self.failed = 0
 
     def to_dict(self) -> dict[str, str]:
         return {"mode": self.mode}
@@ -103,13 +104,31 @@ def test_multiple_documents_create_batch_output(monkeypatch, tmp_path) -> None:
     assert BatchProcessor.calls == [([first, second], False, "Python Basics", None)]
 
 
+def test_failed_batch_returns_nonzero(monkeypatch, tmp_path) -> None:
+    first = tmp_path / "one.pdf"
+    second = tmp_path / "two.png"
+
+    class FailedBatchProcessor(BatchProcessor):
+        def analyze(self, *args, **kwargs):
+            result = super().analyze(*args, **kwargs)
+            result.failed = 1
+            return result
+
+    monkeypatch.setattr(cli, "BatchProcessor", FailedBatchProcessor)
+    monkeypatch.setattr(sys, "argv", ["certguard", str(first), str(second)])
+
+    assert cli.main() == 1
+
+
 def test_manifest_is_loaded_and_passed_to_the_batch(monkeypatch, tmp_path) -> None:
     first = tmp_path / "one.pdf"
     second = tmp_path / "two.png"
     manifest = tmp_path / "class.csv"
     with manifest.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(["filename", "student_id", "expected_recipient", "expected_credential_title"])
+        writer.writerow(
+            ["filename", "student_id", "expected_recipient", "expected_credential_title"]
+        )
         writer.writerow(["one.pdf", "CS21001", "Alice Example", "Python Basics"])
     monkeypatch.setattr(
         sys,
@@ -217,3 +236,71 @@ def test_grammar_root_is_passed_to_pipeline(monkeypatch, tmp_path, capsys) -> No
 
     assert json.loads(capsys.readouterr().out) == {"mode": "single"}
     assert Pipeline.init_kwargs[0]["grammar_root"] == grammar_root
+
+
+def test_benchmark_reports_latency_without_enforcing_threshold(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    source = tmp_path / "certificate.png"
+    source.touch()
+
+    class BenchmarkReport:
+        checks = [type("Check", (), {"name": "semantic_structural_dissonance", "duration_ms": 4})()]
+
+    monkeypatch.setattr(Pipeline, "analyze", lambda _self, _source: BenchmarkReport())
+    monkeypatch.setattr(sys, "argv", ["certguard", "benchmark", str(source), "--iterations", "2"])
+
+    assert cli.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["iterations"] == 2
+    assert output["ssdd_ms"] == {"min": 4.0, "median": 4.0, "p95": 4.0, "max": 4.0}
+    assert output["threshold_enforced"] is False
+
+
+def test_invalid_grammar_configuration_is_a_cli_error(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "certificate.png"
+
+    def invalid_pipeline(**_kwargs):
+        raise cli.GrammarProfileError("invalid signed grammar")
+
+    monkeypatch.setattr(cli, "CertGuardPipeline", invalid_pipeline)
+    monkeypatch.setattr(sys, "argv", ["certguard", str(source), "--grammar-root", "grammar"])
+
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+
+    assert error.value.code == 2
+
+
+def test_build_grammar_subcommand_passes_explicit_inputs(monkeypatch, tmp_path, capsys) -> None:
+    template = tmp_path / "template.png"
+    manifest = tmp_path / "manifest.yaml"
+    output = tmp_path / "grammar" / "example.yaml"
+    key = tmp_path / "grammar.key"
+    calls = []
+    monkeypatch.setenv("CERTGUARD_GRAMMAR_HMAC_KEY_FILE", str(key))
+    monkeypatch.setattr(
+        cli, "build_grammar_profile", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "certguard",
+            "build-grammar",
+            "--issuer",
+            "nptel",
+            "--variant",
+            "v1",
+            "--template",
+            str(template),
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert cli.main() == 0
+    assert calls == [(("nptel", "v1", template, manifest, output), {"key_file": key})]
+    assert capsys.readouterr().out.strip() == str(output)

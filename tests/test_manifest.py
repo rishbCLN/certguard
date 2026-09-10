@@ -24,7 +24,9 @@ class RecordingPipeline:
         return report
 
 
-def write_manifest(path, rows, header=("filename", "student_id", "expected_recipient", "expected_credential_title")):
+def write_manifest(
+    path, rows, header=("filename", "student_id", "expected_recipient", "expected_credential_title")
+):
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(header)
@@ -142,3 +144,23 @@ def test_manifest_row_without_filename_is_rejected(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="missing a filename"):
         load_manifest(manifest)
+
+
+def test_manifest_rejects_duplicate_basenames_in_recursive_batch(tmp_path) -> None:
+    first = tmp_path / "alice"
+    second = tmp_path / "bob"
+    first.mkdir()
+    second.mkdir()
+    (first / "certificate.pdf").touch()
+    (second / "certificate.pdf").touch()
+    manifest = write_manifest(
+        tmp_path / "class.csv",
+        [["certificate.pdf", "CS21001", "Alice", "X"]],
+    )
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        BatchProcessor(RecordingPipeline()).analyze(
+            [tmp_path],
+            recursive=True,
+            manifest=load_manifest(manifest),
+        )

@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from certguard.forensics import ProvenanceAnalyzer, TemplateAnalyzer
 
@@ -82,3 +83,63 @@ def test_available_template_feature_detectors_include_orb_and_sift() -> None:
 
     assert "ORB" in names
     assert "SIFT" in names
+
+
+class SyntheticDetector:
+    def detectAndCompute(self, image, _mask):
+        assert image.ndim == 2
+        points = [(10, 10), (80, 10), (80, 80), (10, 80), (45, 20), (70, 45), (45, 70), (20, 45)]
+        descriptors = np.arange(64).reshape(8, 8).astype(np.float32)
+        return [cv2.KeyPoint(float(x), float(y), 1) for x, y in points], descriptors
+
+
+class SyntheticMatcher:
+    def knnMatch(self, _source, _target, *, k):
+        assert k == 2
+        return [
+            [cv2.DMatch(index, index, 0.1), cv2.DMatch(index, (index + 1) % 8, 1.0)]
+            for index in range(8)
+        ]
+
+
+def test_alignment_estimates_on_grayscale_and_preserves_bgr_rendering(monkeypatch) -> None:
+    monkeypatch.setattr(cv2, "BFMatcher", lambda _norm: SyntheticMatcher())
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    image[:, :] = (11, 22, 33)
+    template = np.zeros((100, 100, 3), dtype=np.uint8)
+
+    result = TemplateAnalyzer._align_context(
+        image, template, "synthetic", SyntheticDetector(), cv2.NORM_L2
+    )
+
+    assert result is not None
+    assert result.aligned_image.ndim == 3
+    assert result.aligned_image[50, 50].tolist() == [11, 22, 33]
+
+
+def test_alignment_context_exposes_dimensions_inliers_and_detector_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(cv2, "BFMatcher", lambda _norm: SyntheticMatcher())
+
+    result = TemplateAnalyzer._align_context(
+        np.zeros((90, 100, 3), dtype=np.uint8),
+        np.zeros((110, 120), dtype=np.uint8),
+        "synthetic",
+        SyntheticDetector(),
+        cv2.NORM_L2,
+    )
+
+    assert result is not None
+    assert result.source_dimensions == (100, 90)
+    assert result.template_dimensions == (120, 110)
+    assert result.inlier_count == 8
+    assert result.match_count == 8
+    assert result.inlier_ratio == 1.0
+    assert result.reprojection_error == pytest.approx(0.0, abs=1e-4)
+    assert result.detector_metadata == {
+        "detector": "synthetic",
+        "source_keypoints": 8,
+        "template_keypoints": 8,
+        "candidate_matches": 8,
+        "ratio_test": 0.75,
+        "ransac_threshold_px": 5.0,
+    }

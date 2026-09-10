@@ -8,9 +8,12 @@ import pytest
 from certguard.document import (
     DocumentTooLargeError,
     LoadedDocument,
+    PageEvidence,
+    TextSpan,
     extract_document,
     extract_loaded_document,
     load_document,
+    load_document_pages,
 )
 
 
@@ -106,6 +109,60 @@ def test_rejects_raster_image_over_pixel_budget(tmp_path) -> None:
             load_document(path)
     finally:
         document_module.MAX_IMAGE_PIXELS = original
+
+
+def test_rejects_raster_dimensions_before_opencv_decode(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "certificate.png"
+    assert cv2.imwrite(str(path), np.zeros((4, 4, 3), dtype=np.uint8))
+    import certguard.document as document_module
+
+    monkeypatch.setattr(document_module, "MAX_IMAGE_PIXELS", 4)
+    decode_called = False
+
+    def decode(*_args, **_kwargs):
+        nonlocal decode_called
+        decode_called = True
+
+    monkeypatch.setattr(cv2, "imread", decode)
+
+    with pytest.raises(DocumentTooLargeError, match="pixel budget"):
+        load_document(path)
+
+    assert not decode_called
+
+
+def test_rejects_pdf_aggregate_render_budget_before_render(monkeypatch, tmp_path) -> None:
+    import fitz
+
+    import certguard.document as document_module
+
+    class Rect:
+        width = 72.0
+        height = 72.0
+
+    class Page:
+        rect = Rect()
+
+        def get_pixmap(self, **_kwargs):
+            raise AssertionError("aggregate limit must run before rendering")
+
+    class Document:
+        page_count = 2
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def __getitem__(self, _index):
+            return Page()
+
+    monkeypatch.setattr(fitz, "open", lambda _path: Document())
+    monkeypatch.setattr(document_module, "MAX_TOTAL_RENDERED_PIXELS", 1)
+
+    with pytest.raises(DocumentTooLargeError, match="aggregate"):
+        document_module.load_document_pages(tmp_path / "certificate.pdf")
 
 
 def test_loads_first_pdf_page(monkeypatch, tmp_path) -> None:
@@ -231,9 +288,7 @@ def test_failed_ocr_and_qr_extraction_are_reported(monkeypatch) -> None:
         def detectAndDecodeMulti(self, _image):
             raise cv2.error("invalid image")
 
-    pytesseract = SimpleNamespace(
-        Output=SimpleNamespace(DICT="dict"), image_to_data=fail_ocr
-    )
+    pytesseract = SimpleNamespace(Output=SimpleNamespace(DICT="dict"), image_to_data=fail_ocr)
     monkeypatch.setitem(sys.modules, "pytesseract", pytesseract)
     monkeypatch.setattr(cv2, "QRCodeDetector", Detector)
 
@@ -301,7 +356,7 @@ def test_loaded_document_combines_text_from_every_page(monkeypatch) -> None:
     assert result.page_count == 2
     assert result.certificate_ids == ["ABC12345"]
     assert [page.page_number for page in result.pages] == [1, 2]
-    assert result.pages[0].text_sources == ["native-pdf"]
+    assert result.pages[0].text_sources == ["native-pdf", "tesseract"]
     assert "Native page one" in result.text
     assert "Certificate ID: ABC12345" in result.text
 
@@ -336,9 +391,26 @@ def test_low_confidence_ocr_uses_better_preprocessed_result(monkeypatch) -> None
 
 def test_ocr_preserves_lines_and_extracts_structured_certificate_view(monkeypatch) -> None:
     words = [
-        "Certificate", "of", "Completion", "Presented", "to", "Alice", "Example",
-        "Course:", "Python", "Basics", "Issued", "by:", "Example", "Learning",
-        "Issue", "Date:", "2026-09-10", "Certificate", "ID:", "ABC12345",
+        "Certificate",
+        "of",
+        "Completion",
+        "Presented",
+        "to",
+        "Alice",
+        "Example",
+        "Course:",
+        "Python",
+        "Basics",
+        "Issued",
+        "by:",
+        "Example",
+        "Learning",
+        "Issue",
+        "Date:",
+        "2026-09-10",
+        "Certificate",
+        "ID:",
+        "ABC12345",
     ]
     line_numbers = [1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 6, 6, 6]
     pytesseract = SimpleNamespace(
@@ -429,8 +501,6 @@ def test_ocr_geometry_is_preserved_as_normalized_spans(monkeypatch) -> None:
 
     monkeypatch.setitem(sys.modules, "pytesseract", pytesseract)
     monkeypatch.setattr(cv2, "QRCodeDetector", Detector)
-    from certguard.document import PageEvidence
-
     evidence = PageEvidence(1, 200, 100)
     extract_document(
         np.zeros((100, 200, 3), dtype=np.uint8),
@@ -440,3 +510,165 @@ def test_ocr_geometry_is_preserved_as_normalized_spans(monkeypatch) -> None:
     assert len(evidence.text_spans) == 1
     assert evidence.text_spans[0].box == pytest.approx((0.1, 0.1, 0.2, 0.2))
     assert evidence.text_spans[0].confidence == 0.9
+
+
+def test_sparse_native_text_runs_ocr_and_deduplicates_overlapping_spans(monkeypatch) -> None:
+    pytesseract = SimpleNamespace(
+        Output=SimpleNamespace(DICT="dict"),
+        image_to_data=lambda *_args, **_kwargs: {
+            "text": ["Certificate", "Raster", "Seal"],
+            "conf": ["95", "91", "90"],
+            "left": [10, 100, 150],
+            "top": [10, 50, 50],
+            "width": [80, 45, 30],
+            "height": [20, 20, 20],
+            "page_num": [1, 1, 1],
+            "block_num": [1, 2, 2],
+            "par_num": [1, 1, 1],
+            "line_num": [1, 1, 1],
+        },
+    )
+
+    class Detector:
+        def detectAndDecodeMulti(self, _image):
+            return False, (), None, None
+
+        def detectAndDecode(self, _image):
+            return "", None, None
+
+    monkeypatch.setitem(sys.modules, "pytesseract", pytesseract)
+    monkeypatch.setattr(cv2, "QRCodeDetector", Detector)
+    evidence = PageEvidence(
+        1,
+        200,
+        100,
+        text_spans=[TextSpan("Certificate", (0.05, 0.1, 0.4, 0.2), "native-pdf")],
+    )
+
+    result = extract_document(
+        np.zeros((100, 200, 3), dtype=np.uint8),
+        native_text="Certificate",
+        page_evidence=evidence,
+    )
+
+    assert result.text == "Certificate\nRaster Seal"
+    assert result.pages[0].text_sources == ["native-pdf", "tesseract"]
+    assert [span.text for span in evidence.text_spans] == ["Certificate", "Raster", "Seal"]
+    assert evidence.text_spans[1].line_box == pytest.approx((0.5, 0.5, 0.4, 0.2))
+    assert evidence.text_spans[1].baseline == pytest.approx(0.7)
+
+
+def test_native_pdf_spans_preserve_boxes_fonts_and_line_baseline() -> None:
+    import certguard.document as document_module
+
+    page = SimpleNamespace(
+        rect=SimpleNamespace(width=200.0, height=100.0),
+        get_text=lambda _format: {
+            "blocks": [
+                {
+                    "lines": [
+                        {
+                            "bbox": [20, 10, 120, 30],
+                            "spans": [
+                                {
+                                    "text": "Recipient",
+                                    "bbox": [20, 10, 80, 30],
+                                    "origin": [20, 27],
+                                    "font": "ExampleSans",
+                                    "size": 14,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+
+    spans = document_module._pdf_text_spans(page)
+
+    assert spans[0].box == pytest.approx((0.1, 0.1, 0.3, 0.2))
+    assert spans[0].line_box == pytest.approx((0.1, 0.1, 0.5, 0.2))
+    assert spans[0].baseline == pytest.approx(0.27)
+    assert (spans[0].font_name, spans[0].font_size) == ("ExampleSans", 14.0)
+
+
+def test_qr_polygon_is_normalized_and_retained(monkeypatch) -> None:
+    class Detector:
+        def detectAndDecodeMulti(self, _image):
+            points = np.array([[[20, 10], [60, 10], [60, 30], [20, 30]]], dtype=np.float32)
+            return True, ("https://verify.example/id",), points, None
+
+    monkeypatch.setattr(cv2, "QRCodeDetector", Detector)
+    evidence = PageEvidence(1, 200, 100)
+
+    extract_document(
+        np.zeros((100, 200, 3), dtype=np.uint8),
+        native_text="Enough native words to avoid invoking optical character recognition",
+        page_evidence=evidence,
+    )
+
+    assert np.asarray(evidence.qr_observations[0].polygon) == pytest.approx(
+        np.array(((0.1, 0.1), (0.3, 0.1), (0.3, 0.3), (0.1, 0.3)))
+    )
+    assert evidence.qr_observations[0].coordinate_system == "normalized-page"
+
+
+def test_pdf_evidence_contains_raster_placements_vectors_and_bounded_metadata(
+    monkeypatch, tmp_path
+) -> None:
+    import fitz
+
+    class Pixmap:
+        samples = bytes([255, 255, 255] * 8)
+        height = 2
+        width = 4
+        n = 3
+
+    class Page:
+        rect = fitz.Rect(0, 0, 200, 100)
+
+        def get_pixmap(self, **_kwargs):
+            return Pixmap()
+
+        def get_text(self, format_name):
+            return "Certificate text" if format_name == "text" else {"blocks": []}
+
+        def get_images(self, *, full):
+            assert full
+            return [(7, 0, 600, 300)]
+
+        def get_image_rects(self, xref):
+            assert xref == 7
+            return [fitz.Rect(20, 10, 164, 82)]
+
+        def get_drawings(self):
+            return [
+                {"rect": fitz.Rect(0, 0, 100, 50)},
+                {"rect": fitz.Rect(50, 25, 150, 75)},
+            ]
+
+    class Document:
+        page_count = 1
+        metadata = {"producer": "p" * 300, "author": "private", "creationDate": "today"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def __getitem__(self, _index):
+            return Page()
+
+    monkeypatch.setattr(fitz, "open", lambda _path: Document())
+
+    loaded = load_document_pages(tmp_path / "evidence.pdf", dpi=72)
+    evidence = loaded.evidence[0]
+
+    assert evidence.embedded_rasters[0].box == pytest.approx((0.1, 0.1, 0.72, 0.72))
+    assert evidence.embedded_rasters[0].effective_dpi_x == pytest.approx(300)
+    assert evidence.embedded_rasters[0].effective_dpi_y == pytest.approx(300)
+    assert len(evidence.vector_drawings) == 2
+    assert evidence.vector_coverage == pytest.approx(0.4375)
+    assert evidence.pdf_metadata == {"producer": "p" * 256, "creationDate": "today"}

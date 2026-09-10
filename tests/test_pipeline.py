@@ -11,7 +11,7 @@ from certguard.models import (
     VerificationResult,
     VerificationStatus,
 )
-from certguard.pipeline import CertGuardPipeline, _review_reasons
+from certguard.pipeline import CertGuardPipeline, _review_reasons, _ruleset_fingerprint
 from certguard.registry import IssuerRegistry
 from certguard.verification import LookupResponse
 
@@ -155,18 +155,30 @@ def test_invalid_review_threshold_is_rejected() -> None:
         CertGuardPipeline(review_threshold=0.0)
 
 
+def test_invalid_grammar_store_fails_at_startup(tmp_path) -> None:
+    grammar_root = tmp_path / "grammar"
+    grammar_root.mkdir()
+    (grammar_root / "bad.yaml").write_text("not: [valid", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid grammar YAML"):
+        CertGuardPipeline(grammar_root=grammar_root)
+
+
 def test_unused_provenance_parameter_is_accepted() -> None:
-    assert _review_reasons(
-        VerificationResult(
-            status=VerificationStatus.VERIFIED, issuer_id="x", issuer_name="x", explanation=""
-        ),
-        TemplateResult(available=False),
-        ProvenanceResult(),
-        SSDDResult(),
-        0.9,
-        0.0,
-        55.0,
-    ) == []
+    assert (
+        _review_reasons(
+            VerificationResult(
+                status=VerificationStatus.VERIFIED, issuer_id="x", issuer_name="x", explanation=""
+            ),
+            TemplateResult(available=False),
+            ProvenanceResult(),
+            SSDDResult(),
+            0.9,
+            0.0,
+            55.0,
+        )
+        == []
+    )
 
 
 def test_high_neural_forgery_signal_routes_to_review() -> None:
@@ -186,3 +198,71 @@ def test_high_neural_forgery_signal_routes_to_review() -> None:
     )
 
     assert reasons == ["The configured forgery model returned a high-risk signal."]
+
+
+def test_only_required_qr_binding_violation_routes_to_review() -> None:
+    verification = VerificationResult(
+        status=VerificationStatus.VERIFIED,
+        issuer_id="x",
+        issuer_name="x",
+        explanation="",
+    )
+    optional = SSDDResult(
+        status="completed",
+        violations=["text-qr-binding-optional-failure"],
+        applicable_profile=True,
+    )
+    required = SSDDResult(
+        status="completed",
+        violations=["text-qr-binding-required-failure"],
+        applicable_profile=True,
+        required_binding_violations=["text-qr-binding-required-failure"],
+    )
+
+    assert (
+        _review_reasons(
+            verification,
+            TemplateResult(available=False),
+            ProvenanceResult(),
+            optional,
+            0.9,
+            0.0,
+            55.0,
+        )
+        == []
+    )
+    assert _review_reasons(
+        verification,
+        TemplateResult(available=False),
+        ProvenanceResult(),
+        required,
+        0.9,
+        0.0,
+        55.0,
+    ) == ["Certificate text did not match configured trusted QR claims."]
+
+
+def test_ruleset_fingerprint_covers_endpoint_response_policy() -> None:
+    original = claim_registry()
+    changed = claim_registry()
+    endpoint = changed.issuers["example"].endpoints[0]
+    changed.issuers["example"] = type(changed.issuers["example"])(
+        **{
+            **{
+                field: getattr(changed.issuers["example"], field)
+                for field in changed.issuers["example"].__dataclass_fields__
+            },
+            "endpoints": (
+                type(endpoint)(
+                    endpoint.url_template,
+                    endpoint.allowed_hosts,
+                    success_markers=("Different marker",),
+                    failure_markers=endpoint.failure_markers,
+                    recipient_patterns=endpoint.recipient_patterns,
+                    credential_patterns=endpoint.credential_patterns,
+                ),
+            ),
+        }
+    )
+
+    assert _ruleset_fingerprint(original) != _ruleset_fingerprint(changed)

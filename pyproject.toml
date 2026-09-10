@@ -34,6 +34,14 @@ certguard = "certguard.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/certguard"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+  "/README.md",
+  "/pyproject.toml",
+  "/src/certguard",
+  "/tests",
+]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 pythonpath = ["src"]
