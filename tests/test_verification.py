@@ -32,6 +32,16 @@ class HttpErrorClient:
         raise HTTPError(url, self.code, "error", None, io.BytesIO(self.body.encode()))
 
 
+class RecordingClient(StubClient):
+    def __init__(self, body: str) -> None:
+        super().__init__(body)
+        self.urls: list[str] = []
+
+    def get(self, url: str, allowed_hosts: set[str], timeout: float) -> LookupResponse:
+        self.urls.append(url)
+        return super().get(url, allowed_hosts, timeout)
+
+
 def registry_with_claims() -> IssuerRegistry:
     return IssuerRegistry.from_data(
         {
@@ -70,17 +80,17 @@ def extraction_for_example() -> ExtractionResult:
 
 def test_record_without_claim_binding_is_not_fully_verified() -> None:
     service = VerificationService(
-        IssuerRegistry.default(), client=StubClient("HackerRank Certificate")
+        IssuerRegistry.default(), client=StubClient("CodeRank Certificate")
     )
     extraction = ExtractionResult(
-        text="HackerRank certificate",
-        urls=["https://www.hackerrank.com/certificates/abc123def"],
+        text="CodeRank certificate",
+        urls=["https://www.coderank.com/certificates/abc123def"],
     )
 
     result = service.verify(extraction)
 
     assert result.status == VerificationStatus.RECORD_FOUND
-    assert result.issuer_id == "hackerrank"
+    assert result.issuer_id == "coderank"
 
 
 def test_recognized_issuer_without_code_is_not_failed_lookup() -> None:
@@ -100,12 +110,12 @@ def test_unrecognized_issuer_is_reported_separately() -> None:
 
 
 def test_generic_success_page_does_not_verify() -> None:
-    service = VerificationService(IssuerRegistry.default(), client=StubClient("HackerRank"))
+    service = VerificationService(IssuerRegistry.default(), client=StubClient("CodeRank"))
 
     result = service.verify(
         ExtractionResult(
-            text="HackerRank certificate",
-            urls=["https://www.hackerrank.com/certificates/abc123def"],
+            text="CodeRank certificate",
+            urls=["https://www.coderank.com/certificates/abc123def"],
         )
     )
 
@@ -197,8 +207,8 @@ def test_network_failure_is_non_adverse() -> None:
 
     result = service.verify(
         ExtractionResult(
-            text="HackerRank",
-            urls=["https://www.hackerrank.com/certificates/abc123def"],
+            text="CodeRank",
+            urls=["https://www.coderank.com/certificates/abc123def"],
         )
     )
 
@@ -207,4 +217,22 @@ def test_network_failure_is_non_adverse() -> None:
 
 def test_host_allowlist_does_not_implicitly_allow_subdomains() -> None:
     assert _host_allowed("verify.example.org", {"verify.example.org"})
-    assert not _host_allowed("attacker.verify.example.org", {"verify.example.org"})
+    assert not _host_allowed("untrusted.verify.example.org", {"verify.example.org"})
+
+
+def test_discovered_official_url_is_fetched_before_rebuilt_endpoint() -> None:
+    client = RecordingClient(
+        "Credential valid Recipient: Alice Example Credential: Python Basics"
+    )
+    service = VerificationService(registry_with_claims(), client=client)
+
+    result = service.verify(
+        ExtractionResult(
+            text="Example",
+            urls=["https://verify.example.org/c/ABC123"],
+        ),
+        SubmissionClaims(recipient="Alice Example", credential_title="Python Basics"),
+    )
+
+    assert result.status == VerificationStatus.VERIFIED
+    assert client.urls == ["https://verify.example.org/c/ABC123"]

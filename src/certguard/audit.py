@@ -19,7 +19,18 @@ class JsonlAuditSink:
         self._lock = threading.Lock()
 
     def append(self, report: AnalysisReport) -> None:
-        serialized = json.dumps(report.to_dict(), separators=(",", ":"), ensure_ascii=True)
+        record = report.to_dict()
+        extraction = record.get("extraction")
+        if isinstance(extraction, dict):
+            extraction["text"] = "[redacted from audit log]"
+            extraction["formatted_text"] = "[redacted from audit log]"
+            extraction["structured_fields"] = {}
+            extraction["pages"] = []
+        search = record.get("search")
+        if isinstance(search, dict):
+            search["query"] = None
+            search["results"] = []
+        serialized = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
         try:
             with self._lock:
                 self.path.parent.mkdir(parents=True, exist_ok=True)

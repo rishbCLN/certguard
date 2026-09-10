@@ -1,7 +1,10 @@
 import cv2
+import numpy as np
 import pytest
 
 from certguard.models import (
+    SearchResult,
+    ExtractionResult,
     TemplateResult,
     VerificationResult,
     VerificationStatus,
@@ -15,6 +18,11 @@ class ClaimLookupClient:
     def get(self, url: str, allowed_hosts: set[str], timeout: float) -> LookupResponse:
         body = "Credential valid Recipient: Alice Example Credential: Python Basics"
         return LookupResponse(200, url, body)
+
+
+class OfficialSearchClient:
+    def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
+        return [SearchResult("Official record", "https://verify.example.org/c/ABC123")]
 
 
 def claim_registry() -> IssuerRegistry:
@@ -73,7 +81,7 @@ def test_pipeline_binds_record_to_trusted_submission_claims(tmp_path) -> None:
     assert len(report.ruleset_fingerprint) == 64
 
 
-def test_pipeline_routes_stolen_record_claims_to_review(tmp_path) -> None:
+def test_pipeline_routes_mismatched_record_claims_to_review(tmp_path) -> None:
     source = tmp_path / "certificate.png"
     write_qr(source, "https://verify.example.org/c/ABC123")
     pipeline = CertGuardPipeline(registry=claim_registry())
@@ -89,6 +97,36 @@ def test_pipeline_routes_stolen_record_claims_to_review(tmp_path) -> None:
     assert report.authenticity_assessment == "issuer-record-mismatch"
     assert report.risk_score == 70
     assert report.review_recommended
+
+
+def test_pipeline_uses_search_discovered_official_record(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "certificate.png"
+    assert cv2.imwrite(str(source), 255 * np.ones((20, 20, 3), dtype=np.uint8))
+    pipeline = CertGuardPipeline(
+        registry=claim_registry(),
+        search_client=OfficialSearchClient(),
+        search_enabled=True,
+    )
+    pipeline.verification.client = ClaimLookupClient()
+
+    monkeypatch.setattr(
+        "certguard.pipeline.extract_loaded_document",
+        lambda _document: ExtractionResult(
+            text="Example Certificate ID: ABC123",
+            certificate_ids=["ABC123"],
+        ),
+    )
+
+    report = pipeline.analyze(
+        source,
+        expected_recipient="Alice Example",
+        expected_credential_title="Python Basics",
+    )
+
+    assert report.search.accepted_urls == ["https://verify.example.org/c/ABC123"]
+    assert report.verification.status == VerificationStatus.VERIFIED
+    assert report.extraction.text == "Example Certificate ID: ABC123"
+    assert report.report_version == "1.2"
 
 
 def test_review_threshold_is_honored() -> None:

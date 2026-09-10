@@ -18,9 +18,10 @@ class Result:
 
 class Pipeline:
     calls: list[tuple[Path, dict[str, object]]] = []
+    init_kwargs: list[dict[str, object]] = []
 
-    def __init__(self, **_kwargs) -> None:
-        pass
+    def __init__(self, **kwargs) -> None:
+        self.init_kwargs.append(kwargs)
 
     def analyze(self, source: Path, **kwargs) -> Result:
         self.calls.append((source, kwargs))
@@ -41,6 +42,7 @@ class BatchProcessor:
 @pytest.fixture(autouse=True)
 def replace_processors(monkeypatch):
     Pipeline.calls.clear()
+    Pipeline.init_kwargs.clear()
     BatchProcessor.calls.clear()
     monkeypatch.setattr(cli, "CertGuardPipeline", Pipeline)
     monkeypatch.setattr(cli, "BatchProcessor", BatchProcessor)
@@ -146,6 +148,37 @@ def test_batch_rejects_a_shared_recipient(monkeypatch, tmp_path) -> None:
         sys,
         "argv",
         ["certguard", str(first), str(second), "--expected-recipient", "Alice"],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+
+    assert error.value.code == 2
+
+
+def test_brave_search_uses_environment_key(monkeypatch, tmp_path, capsys) -> None:
+    source = tmp_path / "certificate.pdf"
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "secret-key")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["certguard", str(source), "--search", "brave"],
+    )
+
+    assert cli.main() == 0
+
+    assert json.loads(capsys.readouterr().out) == {"mode": "single"}
+    assert Pipeline.init_kwargs[0]["search_enabled"] is True
+    assert Pipeline.init_kwargs[0]["search_client"].api_key == "secret-key"
+
+
+def test_brave_search_requires_environment_key(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "certificate.pdf"
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["certguard", str(source), "--search", "brave"],
     )
 
     with pytest.raises(SystemExit) as error:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from certguard.audit import JsonlAuditSink
 from certguard.content import analyze_content
-from certguard.document import extract_document, load_document
+from certguard.document import extract_loaded_document, load_document_pages
 from certguard.forensics import ProvenanceAnalyzer, TemplateAnalyzer
 from certguard.models import (
     AnalysisReport,
@@ -18,6 +18,7 @@ from certguard.models import (
     ContentResult,
     ExtractionResult,
     ProvenanceResult,
+    SearchEvidence,
     SubmissionClaims,
     TemplateResult,
     VerificationResult,
@@ -25,6 +26,7 @@ from certguard.models import (
 )
 from certguard.registry import IssuerRegistry
 from certguard.scoring import calculate_risk
+from certguard.search import SearchClient, discover_official_pages
 from certguard.verification import VerificationService
 
 
@@ -35,6 +37,8 @@ class CertGuardPipeline:
         template_root: Path | None = None,
         audit_sink: JsonlAuditSink | None = None,
         network_enabled: bool = True,
+        search_client: SearchClient | None = None,
+        search_enabled: bool = False,
         review_threshold: float = 55.0,
     ) -> None:
         if not 0 < review_threshold <= 100:
@@ -45,6 +49,8 @@ class CertGuardPipeline:
         )
         self.templates = TemplateAnalyzer(template_root)
         self.provenance = ProvenanceAnalyzer()
+        self.search_client = search_client
+        self.search_enabled = search_enabled and network_enabled
         self.audit_sink = audit_sink
         self.review_threshold = review_threshold
 
@@ -63,19 +69,25 @@ class CertGuardPipeline:
         checks: list[AuditCheck] = []
 
         started = time.perf_counter()
-        image, page_count = load_document(source_path)
+        document = load_document_pages(source_path)
+        image = document.images[0]
         checks.append(
             AuditCheck(
                 name="document_load",
                 state=CheckState.COMPLETED,
                 summary="Document decoded for analysis.",
-                evidence={"page_count": page_count, "width": image.shape[1], "height": image.shape[0]},
+                evidence={
+                    "page_count": document.page_count,
+                    "rendered_page_count": len(document.images),
+                    "width": image.shape[1],
+                    "height": image.shape[0],
+                },
                 duration_ms=_elapsed_ms(started),
             )
         )
 
         started = time.perf_counter()
-        extraction = extract_document(image, page_count)
+        extraction = extract_loaded_document(document)
         extraction_state = CheckState.COMPLETED if not extraction.errors else CheckState.ERROR
         checks.append(
             AuditCheck(
@@ -89,14 +101,21 @@ class CertGuardPipeline:
                 evidence={
                     "ocr_confidence": extraction.ocr_confidence,
                     "certificate_id_count": len(extraction.certificate_ids),
+                    "structured_field_count": len(extraction.structured_fields),
                     "url_count": len(extraction.urls),
                     "qr_count": len(extraction.qr_values),
+                    "text_page_count": sum(bool(page.text) for page in extraction.pages),
+                    "text_sources": sorted(
+                        {source for page in extraction.pages for source in page.text_sources}
+                    ),
                     "errors": extraction.errors,
                 },
                 duration_ms=_elapsed_ms(started),
             )
         )
 
+        search = self._search(extraction, checks)
+        extraction.urls = list(dict.fromkeys([*extraction.urls, *search.accepted_urls]))
         claims = SubmissionClaims(expected_recipient, expected_credential_title)
         verification = self._verify(extraction, checks, claims)
         issuer = self.registry.get(verification.issuer_id)
@@ -184,6 +203,8 @@ class CertGuardPipeline:
                 "was AI-generated; CertGuard checks issuer records and document consistency instead"
             ),
             ruleset_fingerprint=_ruleset_fingerprint(self.registry),
+            extraction=extraction,
+            search=search,
             verification=verification,
             template=template,
             provenance=provenance,
@@ -194,6 +215,38 @@ class CertGuardPipeline:
         if self.audit_sink:
             self.audit_sink.append(report)
         return report
+
+    def _search(
+        self, extraction: ExtractionResult, checks: list[AuditCheck]
+    ) -> SearchEvidence:
+        started = time.perf_counter()
+        result = discover_official_pages(
+            extraction,
+            self.registry,
+            self.search_client,
+            enabled=self.search_enabled,
+        )
+        checks.append(
+            AuditCheck(
+                name="official_web_search",
+                state=(
+                    CheckState.ERROR
+                    if result.error and result.error != "search-client-unavailable"
+                    else CheckState.COMPLETED
+                    if result.enabled
+                    else CheckState.SKIPPED
+                ),
+                summary=result.explanation,
+                evidence={
+                    "issuer_id": result.issuer_id,
+                    "result_count": len(result.results),
+                    "accepted_url_count": len(result.accepted_urls),
+                    "error": result.error,
+                },
+                duration_ms=_elapsed_ms(started),
+            )
+        )
+        return result
 
     def _verify(
         self,
@@ -303,6 +356,7 @@ def _ruleset_fingerprint(registry: IssuerRegistry) -> str:
             {
                 "id": issuer.issuer_id,
                 "urls": issuer.verification_url_patterns,
+                "official_domains": issuer.official_domains,
                 "ids": issuer.certificate_id_patterns,
                 "endpoints": [endpoint.url_template for endpoint in issuer.endpoints],
                 "templates": issuer.templates,

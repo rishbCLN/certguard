@@ -7,6 +7,7 @@
       "aliases": ["Coursera"],
       "verification_url_patterns": ["^https://(?:www\\.)?coursera\\.org/account/accomplishments/(?:verify|certificate)/[A-Za-z0-9_-]+/?(?:[?#].*)?$"],
       "allowed_hosts": ["coursera.org", "www.coursera.org"],
+      "official_domains": ["coursera.org"],
       "endpoints": [
         {
           "url_template": "https://www.coursera.org/account/accomplishments/verify/{certificate_id}",
@@ -24,6 +25,7 @@
       "aliases": ["NPTEL", "National Programme on Technology Enhanced Learning", "SWAYAM"],
       "verification_url_patterns": ["^https://(?:archive\\.)?nptel\\.ac\\.in/.+"],
       "allowed_hosts": ["nptel.ac.in", "archive.nptel.ac.in"],
+      "official_domains": ["nptel.ac.in"],
       "endpoints": [],
       "certificate_id_patterns": ["(?:certificate|roll|enrollment)(?: no| number| id)?[.:#\\s]+([A-Za-z0-9_-]{6,64})"],
       "language_phrases": ["online certification", "funded by the MoE"]
@@ -34,6 +36,7 @@
       "aliases": ["edX"],
       "verification_url_patterns": ["^https://credentials\\.edx\\.org/credentials/[A-Za-z0-9_-]+/?(?:[?#].*)?$"],
       "allowed_hosts": ["credentials.edx.org"],
+      "official_domains": ["edx.org"],
       "endpoints": [
         {
           "url_template": "https://credentials.edx.org/credentials/{certificate_id}/",
@@ -46,21 +49,22 @@
       "language_phrases": ["successfully completed and received a passing grade", "verified certificate"]
     },
     {
-      "id": "hackerrank",
-      "display_name": "HackerRank",
-      "aliases": ["HackerRank"],
-      "verification_url_patterns": ["^https://www\\.hackerrank\\.com/certificates/[A-Za-z0-9_-]+/?(?:[?#].*)?$"],
-      "allowed_hosts": ["www.hackerrank.com"],
+      "id": "coderank",
+      "display_name": "CodeRank",
+      "aliases": ["CodeRank"],
+      "verification_url_patterns": ["^https://(?:www\\.)?coderank\\.com/certificates/[A-Za-z0-9_-]+/?(?:[?#].*)?$"],
+      "allowed_hosts": ["www.coderank.com"],
+      "official_domains": ["coderank.com"],
       "endpoints": [
         {
-          "url_template": "https://www.hackerrank.com/certificates/{certificate_id}",
-          "allowed_hosts": ["www.hackerrank.com"],
-          "success_markers": ["Certificate", "HackerRank"],
+          "url_template": "https://www.coderank.com/certificates/{certificate_id}",
+          "allowed_hosts": ["www.coderank.com"],
+          "success_markers": ["Certificate", "CodeRank"],
           "failure_markers": ["not found", "invalid certificate"]
         }
       ],
       "certificate_id_patterns": ["certificates/([A-Za-z0-9_-]{6,64})", "certificate id[:#\\s]+([A-Za-z0-9_-]{6,64})"],
-      "language_phrases": ["has successfully cleared the assessment", "HackerRank Skills Certification Test"]
+      "language_phrases": ["has successfully cleared the assessment", "CodeRank Skills Certification Test"]
     },
     {
       "id": "unstop",
@@ -68,6 +72,7 @@
       "aliases": ["Unstop", "Dare2Compete"],
       "verification_url_patterns": ["^https://unstop\\.com/certificate-preview/[A-Za-z0-9_-]+/?(?:[?#].*)?$"],
       "allowed_hosts": ["unstop.com"],
+      "official_domains": ["unstop.com"],
       "endpoints": [
         {
           "url_template": "https://unstop.com/certificate-preview/{certificate_id}",
@@ -85,9 +90,10 @@
       "aliases": ["Devfolio"],
       "verification_url_patterns": ["^https://.+\\.devfolio\\.co/.+"],
       "allowed_hosts": ["devfolio.co"],
+      "official_domains": ["devfolio.co"],
       "endpoints": [],
       "certificate_id_patterns": ["certificate id[:#\\s]+([A-Za-z0-9_-]{6,64})"],
-      "language_phrases": ["certificate of participation", "hackathon"]
+      "language_phrases": ["certificate of participation", "competition"]
     }
   ]
 }

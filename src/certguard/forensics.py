@@ -136,7 +136,7 @@ class ProvenanceAnalyzer:
         digital_anomaly = float(np.mean(edit_scores)) if edit_scores else 0.0
         explanation = (
             f"Capture characteristics are most consistent with {method}. "
-            "This describes provenance and is not, by itself, evidence of fraud."
+            "This describes provenance and is not, by itself, evidence of invalidity."
         )
         return ProvenanceResult(
             capture_method=method,

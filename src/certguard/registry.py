@@ -30,6 +30,7 @@ class IssuerDefinition:
     aliases: tuple[str, ...]
     verification_url_patterns: tuple[str, ...]
     allowed_hosts: tuple[str, ...]
+    official_domains: tuple[str, ...] = ()
     endpoints: tuple[VerificationEndpoint, ...] = ()
     certificate_id_patterns: tuple[str, ...] = ()
     language_phrases: tuple[str, ...] = ()
@@ -76,6 +77,7 @@ class IssuerRegistry:
                 aliases=tuple(raw.get("aliases", [])),
                 verification_url_patterns=tuple(raw.get("verification_url_patterns", [])),
                 allowed_hosts=tuple(raw.get("allowed_hosts", [])),
+                official_domains=tuple(raw.get("official_domains", raw.get("allowed_hosts", []))),
                 endpoints=endpoints,
                 certificate_id_patterns=tuple(raw.get("certificate_id_patterns", [])),
                 language_phrases=tuple(raw.get("language_phrases", [])),
@@ -104,6 +106,10 @@ class IssuerRegistry:
                     raise ValueError(
                         f"Claim pattern for {issuer.issuer_id} must have one capture group"
                     )
+        for domain in issuer.official_domains:
+            parsed = urlparse(f"https://{domain}")
+            if not parsed.hostname or parsed.hostname != domain.casefold().rstrip("."):
+                raise ValueError(f"Official domain for {issuer.issuer_id} is invalid")
 
     def identify(self, text: str, urls: list[str]) -> list[IssuerDefinition]:
         haystack = text.casefold()

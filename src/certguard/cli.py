@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from certguard.audit import JsonlAuditSink
 from certguard.batch import BatchProcessor, load_manifest
 from certguard.pipeline import CertGuardPipeline
 from certguard.registry import IssuerRegistry
+from certguard.search import BraveSearchClient
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--offline", action="store_true", help="Extract candidates but do not contact issuer services"
     )
     parser.add_argument(
+        "--search",
+        choices=("brave",),
+        help="Discover official verification pages with a text search API",
+    )
+    parser.add_argument(
         "--recursive",
         action="store_true",
         help="Include supported documents in nested input directories",
@@ -61,6 +68,15 @@ def main() -> int:
         parser.error("--recursive requires at least one directory")
     if args.manifest and not batch_requested:
         parser.error("--manifest can only be used with batch documents")
+    if args.offline and args.search:
+        parser.error("--search cannot be used with --offline")
+
+    search_client = None
+    if args.search == "brave":
+        api_key = os.environ.get("BRAVE_SEARCH_API_KEY", "")
+        if not api_key:
+            parser.error("--search brave requires BRAVE_SEARCH_API_KEY")
+        search_client = BraveSearchClient(api_key)
 
     registry = IssuerRegistry.from_file(args.registry) if args.registry else IssuerRegistry.default()
     audit_sink = JsonlAuditSink(args.audit_log) if args.audit_log else None
@@ -69,6 +85,8 @@ def main() -> int:
         template_root=args.templates,
         audit_sink=audit_sink,
         network_enabled=not args.offline,
+        search_client=search_client,
+        search_enabled=bool(args.search),
     )
     if batch_requested:
         manifest = load_manifest(args.manifest) if args.manifest else None

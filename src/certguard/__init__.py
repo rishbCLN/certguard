@@ -1,4 +1,4 @@
-"""CertGuard certificate-fraud triage pipeline."""
+"""CertGuard certificate verification triage pipeline."""
 
 from certguard.models import AnalysisReport, VerificationStatus
 from certguard.pipeline import CertGuardPipeline

@@ -25,7 +25,7 @@ def test_verified_lookup_dominates_missing_optional_signals() -> None:
     assert [item.signal for item in contributions] == ["verification_lookup"]
 
 
-def test_provenance_capture_method_is_not_scored_as_fraud() -> None:
+def test_provenance_capture_method_is_not_scored_as_adverse() -> None:
     digital_score, _, _ = calculate_risk(
         verification(VerificationStatus.VERIFIED),
         TemplateResult(available=False),
@@ -55,7 +55,7 @@ def test_failed_lookup_scores_higher_than_content_wording() -> None:
     assert coverage == 1.0
 
 
-def test_operational_lookup_failure_is_not_scored_as_fraud() -> None:
+def test_operational_lookup_failure_is_not_scored_as_adverse() -> None:
     score, coverage, contributions = calculate_risk(
         verification(VerificationStatus.LOOKUP_UNAVAILABLE),
         TemplateResult(available=False),

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "certguard"
 version = "0.1.0"
-description = "Human-in-the-loop certificate fraud triage pipeline"
+description = "Human-in-the-loop certificate verification triage pipeline"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

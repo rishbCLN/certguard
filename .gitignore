@@ -8,3 +8,7 @@ build/
 *.egg-info/
 reports/
 audit/*.jsonl
+.env
+.env.*
+.coverage
+.kilo/

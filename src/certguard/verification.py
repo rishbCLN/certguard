@@ -122,6 +122,10 @@ class VerificationService:
         urls = self._matching_urls(issuer, extraction.urls + extraction.qr_values)
         ids = self._extract_ids(issuer, extraction, urls)
         candidates: list[tuple[str, VerificationEndpoint]] = []
+        for url in urls:
+            endpoint = self._endpoint_for_url(issuer, url)
+            if endpoint is not None:
+                candidates.append((url, endpoint))
         for certificate_id in ids:
             candidates.extend((endpoint.build_url(certificate_id), endpoint) for endpoint in issuer.endpoints)
 
@@ -279,6 +283,16 @@ class VerificationService:
             ),
             **base,
         )
+
+    @staticmethod
+    def _endpoint_for_url(
+        issuer: IssuerDefinition, url: str
+    ) -> VerificationEndpoint | None:
+        hostname = urlparse(url).hostname
+        for endpoint in issuer.endpoints:
+            if _host_allowed(hostname, set(endpoint.allowed_hosts)):
+                return endpoint
+        return None
 
     @staticmethod
     def _matching_urls(issuer: IssuerDefinition, values: list[str]) -> list[str]:

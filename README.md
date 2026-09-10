@@ -1,6 +1,6 @@
 # CertGuard
 
-CertGuard is a Python scaffold for human-in-the-loop certificate-fraud triage. It extracts text, certificate codes, and QR links; checks allowlisted issuer verification services; compares uploads to issuer templates when references exist; records provenance and edit indicators; and emits one explainable risk score plus a complete per-check audit trail.
+CertGuard is a Python scaffold for human-in-the-loop certificate verification triage. It extracts English text from every image/PDF page, certificate codes, and QR links; checks allowlisted issuer verification services; optionally discovers official verification pages with Brave Search; compares uploads to issuer templates when references exist; records provenance and edit indicators; and emits one explainable risk score plus a complete per-check audit trail.
 
 CertGuard does not claim to detect "AI-generated" certificates from visual style. That classification is not reliable enough for academic decisions. It distinguishes stronger authenticity evidence instead: an issuer record bound to the submitted claims, explicit issuer rejection, claim mismatch, configured-template inconsistency, and inconclusive or unavailable evidence. Generic generated designs should fail to gain a positive result unless their code and identity claims match an authoritative issuer record.
 
@@ -8,7 +8,7 @@ It never emits an academic-credit decision. `review_recommended` is a queueing h
 
 ## Pipeline
 
-1. **Verification lookup (70% fixed weight):** OCR and QR extraction identify issuer URLs and codes. Only HTTPS endpoints and redirects on each issuer's exact host allowlist are contacted. A bare HTTP 2xx response is never enough. Outcomes distinguish a claim-bound `verified` record, an unbound `record-found`, `claims-mismatch`, explicit `failed-lookup`, operationally unavailable/inconclusive lookup, unknown issuer, and absent code.
+1. **Verification lookup (70% fixed weight):** Native PDF text, English OCR, and QR extraction identify issuer URLs and codes. Optional Brave text search uses only the issuer and certificate ID to discover registry-approved official verification URLs. Only HTTPS endpoints and redirects on each issuer's exact host allowlist are contacted. Search snippets and a bare HTTP 2xx response are never enough. Outcomes distinguish a claim-bound `verified` record, an unbound `record-found`, `claims-mismatch`, explicit `failed-lookup`, operationally unavailable/inconclusive lookup, unknown issuer, and absent code.
 2. **Template/layout forensics (20% base weight):** ORB keypoints and RANSAC homography align a document with configured genuine references. SSIM compares logo and text regions, while edge SSIM compares layout. This check is skipped rather than penalized when no reference exists.
 3. **Recapture/provenance:** Frequency peaks and sharpness provide a deliberately conservative capture-method estimate. Screen or print recapture does not add risk by itself. ELA, copy-move, and EXIF observations are reviewer evidence and are not scored until calibrated on representative data.
 4. **Content plausibility (3% base weight):** OCR wording is compared with issuer phrases and kept supplementary.
@@ -33,6 +33,15 @@ certguard certificate.pdf --offline --output reports\submission.json --audit-log
 ```
 
 Enable live issuer lookup by omitting `--offline`. Public verification pages change over time, so their patterns and success/failure markers require monitored maintenance before production use.
+
+Optionally enable Brave text-search discovery. Certificate images, full OCR text, and recipient names are not sent to Brave; the query contains the recognized issuer, certificate ID, and configured official domains. Search results are evidence discovery only and cannot verify a certificate unless the resulting approved official page is fetched and its claims match.
+
+```powershell
+$env:BRAVE_SEARCH_API_KEY = "your-api-key"
+certguard certificate.pdf --search brave --expected-recipient "Student Name" --expected-credential-title "Python Basics"
+```
+
+`--offline` disables both search and issuer-page lookup. API keys are read only from the environment and are not included in reports or audit checks.
 
 Analyze several documents or all supported files in a directory as one fault-tolerant batch:
 
@@ -106,21 +115,22 @@ Region coordinates are normalized `[x, y, width, height]`. Reference images must
 
 ## Audit And Fairness
 
-Every report contains a SHA-256 source fingerprint, ruleset fingerprint, evidence coverage, timestamp, report version, check status, duration, evidence, signal contribution, and plain-language explanation. The JSONL adapter is append-only at process level; production systems should replace it with immutable storage, access controls, retention policy, encryption, and authenticated reviewer actions.
+Every report contains a SHA-256 source fingerprint, ruleset fingerprint, extracted page text and its source, evidence coverage, timestamp, report version, check status, duration, evidence, signal contribution, and plain-language explanation. The JSONL audit adapter redacts raw extracted text, page text, search queries, and search snippets; it is append-only at process level. Production systems should replace it with immutable storage, access controls, retention policy, encryption, and authenticated reviewer actions.
 
 Operational safeguards required before deployment:
 
 - Calibrate score thresholds on representative, consented samples and compare error rates across document language, issuer, scan quality, device, and accessibility workflows.
-- Never treat recapture, missing EXIF, low OCR confidence, an unknown issuer, or service downtime as proof of fraud.
+- Never treat recapture, missing EXIF, low OCR confidence, an unknown issuer, or service downtime as proof of invalidity.
 - Show the source evidence and failed/omitted checks to reviewers and appellants; allow issuer confirmation or replacement documents.
-- Cache only what policy permits, redact sensitive OCR from logs, and use request throttling consistent with issuer terms.
+- Cache only what policy permits, redact private OCR from logs, and use request throttling consistent with issuer terms.
 - Add issuer-specific response parsers or documented APIs where available. HTML marker matching here is a scaffold, not a production trust anchor.
 
 ## Layout
 
 ```text
 src/certguard/
-  document.py       OCR, PDF rendering, QR and candidate extraction
+  document.py       Multi-page OCR, native PDF text, QR and candidate extraction
+  search.py         Brave text search and official-result filtering
   registry.py       extensible issuer and endpoint definitions
   verification.py   allowlisted network lookup
   forensics.py      alignment, SSIM, recapture, ELA, copy-move, EXIF

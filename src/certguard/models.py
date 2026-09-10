@@ -36,14 +36,45 @@ class AuditCheck:
 
 
 @dataclass(slots=True)
+class PageExtraction:
+    page_number: int
+    text: str = ""
+    text_sources: list[str] = field(default_factory=list)
+    ocr_confidence: float | None = None
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ExtractionResult:
     text: str = ""
+    structured_fields: dict[str, str] = field(default_factory=dict)
+    formatted_text: str = ""
     certificate_ids: list[str] = field(default_factory=list)
     urls: list[str] = field(default_factory=list)
     qr_values: list[str] = field(default_factory=list)
     ocr_confidence: float | None = None
     page_count: int = 1
+    pages: list[PageExtraction] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SearchResult:
+    title: str
+    url: str
+    description: str = ""
+    accepted: bool = False
+
+
+@dataclass(slots=True)
+class SearchEvidence:
+    enabled: bool = False
+    issuer_id: str | None = None
+    query: str | None = None
+    results: list[SearchResult] = field(default_factory=list)
+    accepted_urls: list[str] = field(default_factory=list)
+    explanation: str = "Online search was not enabled."
+    error: str | None = None
 
 
 @dataclass(slots=True)
@@ -118,13 +149,15 @@ class AnalysisReport:
     authenticity_assessment: str
     ai_origin_assessment: str
     ruleset_fingerprint: str
+    extraction: ExtractionResult
+    search: SearchEvidence
     verification: VerificationResult
     template: TemplateResult
     provenance: ProvenanceResult
     content: ContentResult
     contributions: list[RiskContribution]
     checks: list[AuditCheck]
-    report_version: str = "1.1"
+    report_version: str = "1.2"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
