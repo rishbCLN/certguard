@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import sys
@@ -14,6 +15,8 @@ from certguard.pipeline import CertGuardPipeline
 from certguard.registry import IssuerRegistry
 from certguard.search import BraveSearchClient
 from certguard.ssdd import GrammarProfileError, build_grammar_profile
+from certguard.template_server import serve_templates
+from certguard.templates import TemplateCatalog, TemplateCatalogError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--registry", type=Path, help="Custom issuer registry JSON")
     parser.add_argument("--grammar-root", type=Path, help="Signed issuer grammar profile directory")
     parser.add_argument("--templates", type=Path, help="Reference template directory")
+    parser.add_argument(
+        "--template-catalog",
+        type=Path,
+        help="Managed template catalog root (supplies definitions and reference images)",
+    )
     parser.add_argument(
         "--forgery-model",
         type=Path,
@@ -75,6 +83,8 @@ def main() -> int:
         return build_grammar_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "benchmark":
         return benchmark_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "templates":
+        return templates_main(sys.argv[2:])
     parser = build_parser()
     args = parser.parse_args()
     batch_requested = len(args.documents) > 1 or any(path.is_dir() for path in args.documents)
@@ -88,6 +98,8 @@ def main() -> int:
         parser.error("--manifest can only be used with batch documents")
     if args.offline and args.search:
         parser.error("--search cannot be used with --offline")
+    if args.templates and args.template_catalog:
+        parser.error("--templates cannot be combined with --template-catalog")
 
     search_client = None
     if args.search == "brave":
@@ -105,7 +117,7 @@ def main() -> int:
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     try:
-        pipeline = CertGuardPipeline(
+        pipeline_options = dict(
             registry=registry,
             template_root=args.templates,
             audit_sink=audit_sink,
@@ -115,7 +127,10 @@ def main() -> int:
             forgery_model=forgery_model,
             grammar_root=args.grammar_root,
         )
-    except GrammarProfileError as exc:
+        if args.template_catalog is not None:
+            pipeline_options["template_catalog"] = args.template_catalog
+        pipeline = CertGuardPipeline(**pipeline_options)
+    except (GrammarProfileError, TemplateCatalogError, OSError, ValueError) as exc:
         parser.error(str(exc))
     if batch_requested:
         manifest = load_manifest(args.manifest) if args.manifest else None
@@ -200,6 +215,76 @@ def benchmark_main(argv: list[str]) -> int:
     }
     print(json.dumps(output, indent=2))
     return 0
+
+
+def templates_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="certguard templates")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    add = subparsers.add_parser("add", help="Normalize and add a template")
+    add.add_argument("--catalog", type=Path, required=True)
+    add.add_argument("--registry", type=Path)
+    add.add_argument("--issuer", required=True)
+    add.add_argument("--name", required=True)
+    add.add_argument("--file", type=Path, required=True)
+    add.add_argument(
+        "--confirm-anonymized",
+        action="store_true",
+        required=True,
+        help=(
+            "Confirm the template is anonymized, rights-cleared, and contains no personal "
+            "recipient data"
+        ),
+    )
+    list_parser = subparsers.add_parser("list", help="List templates and integrity status")
+    list_parser.add_argument("--catalog", type=Path, required=True)
+    list_parser.add_argument("--registry", type=Path)
+    remove = subparsers.add_parser("remove", help="Remove a template by opaque ID")
+    remove.add_argument("--catalog", type=Path, required=True)
+    remove.add_argument("--registry", type=Path)
+    remove.add_argument("--id", required=True)
+    serve = subparsers.add_parser("serve", help="Run the local template web UI")
+    serve.add_argument("--catalog", type=Path, required=True)
+    serve.add_argument("--registry", type=Path)
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args(argv)
+    registry = (
+        IssuerRegistry.from_file(args.registry) if args.registry else IssuerRegistry.default()
+    )
+    catalog = TemplateCatalog(args.catalog, registry)
+    try:
+        if args.command == "add":
+            output: object = catalog.add(
+                args.issuer,
+                args.name,
+                args.file,
+                confirm_anonymized=args.confirm_anonymized,
+            )
+        elif args.command == "list":
+            output = catalog.list()
+        elif args.command == "remove":
+            output = catalog.remove(args.id)
+        else:
+            if not 0 <= args.port <= 65535:
+                parser.error("--port must be between 0 and 65535")
+            if not _is_loopback_host(args.host):
+                parser.error("--host must be a loopback address or localhost")
+            print(f"CertGuard template UI listening on http://{args.host}:{args.port}")
+            serve_templates(args.catalog, host=args.host, port=args.port, registry=registry)
+            return 0
+    except (OSError, TemplateCatalogError, ValueError) as exc:
+        parser.error(str(exc))
+    print(json.dumps(output, indent=2))
+    return 0
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _latency_summary(values: list[float | int]) -> dict[str, float]:

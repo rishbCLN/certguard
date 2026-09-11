@@ -238,6 +238,42 @@ def test_grammar_root_is_passed_to_pipeline(monkeypatch, tmp_path, capsys) -> No
     assert Pipeline.init_kwargs[0]["grammar_root"] == grammar_root
 
 
+def test_template_catalog_is_passed_to_pipeline(monkeypatch, tmp_path, capsys) -> None:
+    source = tmp_path / "certificate.pdf"
+    catalog = tmp_path / "templates"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["certguard", str(source), "--template-catalog", str(catalog)],
+    )
+
+    assert cli.main() == 0
+
+    assert json.loads(capsys.readouterr().out) == {"mode": "single"}
+    assert Pipeline.init_kwargs[0]["template_catalog"] == catalog
+
+
+def test_template_catalog_conflicts_with_legacy_template_root(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "certificate.pdf"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "certguard",
+            str(source),
+            "--template-catalog",
+            str(tmp_path / "catalog"),
+            "--templates",
+            str(tmp_path / "legacy"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+
+    assert error.value.code == 2
+
+
 def test_benchmark_reports_latency_without_enforcing_threshold(
     monkeypatch, tmp_path, capsys
 ) -> None:

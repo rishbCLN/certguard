@@ -132,7 +132,60 @@ Copy `src/certguard/data/issuers.json`, add an entry, and pass it with `--regist
 
 ## Adding Templates
 
-Template support is registry-driven. Add `templates` to an issuer and provide `--templates <root>`:
+The preferred workflow uses an external, user-selected managed catalog. Start the local web UI,
+then open the displayed loopback URL:
+
+```powershell
+certguard templates serve --catalog C:\certguard-data\templates
+```
+
+The UI presents the complete click flow: select an issuer, enter a template display name, choose
+a blank or anonymized official certificate image or single-page PDF, explicitly confirm that it is
+anonymized, rights-cleared, and contains no personal recipient data, and click **Add Template**. The
+server defaults to `127.0.0.1:8765` and rejects every non-loopback bind address; it is a local-only
+management interface.
+
+The equivalent automation commands emit JSON:
+
+```powershell
+certguard templates add --catalog C:\certguard-data\templates `
+  --issuer coursera --name "2026 landscape" --file approved\coursera-2026.pdf `
+  --confirm-anonymized
+certguard templates list --catalog C:\certguard-data\templates
+certguard templates remove --catalog C:\certguard-data\templates --id OPAQUE_ID_FROM_LIST
+```
+
+Uploads use the normal document size and pixel limits. Multi-page PDFs and blank, low-information,
+or featureless references are rejected. Accepted files are normalized to PNG and stored beneath the
+catalog root with dimensions, SHA-256, detector availability/keypoint counts, and edge/layout
+metrics. The normalized image pixels are stored locally and may themselves contain visible personal
+data; CertGuard does not redact or prove that pixels are anonymous. Only blank/anonymized official
+references that are rights-cleared and contain no personal recipient data may be uploaded. Metadata,
+OCR text, and OCR-derived values are not extracted or persisted by catalog management. Listing
+validates artifact presence, symlink safety, and SHA-256 integrity. The normalized reference image
+remains the source of truth so runtime `TemplateAnalyzer` descriptors stay compatible with the
+installed OpenCV version.
+
+Use the catalog directly during normal analysis; it supplies both issuer template definitions and
+the reference-image root:
+
+```powershell
+certguard certificate.pdf --template-catalog C:\certguard-data\templates --offline
+```
+
+`--template-catalog` cannot be combined with legacy `--templates`. A custom issuer registry can be
+used consistently with both catalog management and analysis via `--registry`.
+
+Adding a file establishes only a local known reference. It does not prove that the issuer created
+the reference or that any compared certificate is authentic. Catalog access and reference images
+must be access-controlled, rights-cleared, reviewed, and versioned according to local policy.
+Managed template definitions include the normalized image SHA-256 in the report ruleset fingerprint.
+Analysis verifies that digest immediately before decoding the captured bytes; missing, changed, or
+symlinked artifacts are unavailable and are not analyzed. Legacy registry definitions without a
+`sha256` retain their prior path-based behavior.
+
+Legacy registry-driven template definitions remain available. Add `templates` to an issuer and
+provide `--templates <root>`:
 
 ```json
 "templates": [{
@@ -145,7 +198,11 @@ Template support is registry-driven. Add `templates` to an issuer and provide `-
 }]
 ```
 
-Region coordinates are normalized `[x, y, width, height]`. Reference images must be rights-cleared, access-controlled known-genuine samples. Version registry/template changes in deployment so an appeal can be replayed against the exact rules used originally.
+Region coordinates are normalized `[x, y, width, height]`. Managed catalogs deliberately do not
+invent logo or text regions; only explicitly reviewed legacy definitions use these optional regions.
+Reference images must be rights-cleared, access-controlled known-genuine samples. Version
+registry/template changes in deployment so an appeal can be replayed against the exact rules used
+originally.
 
 ## Audit And Fairness
 
@@ -170,6 +227,8 @@ src/certguard/
   forensics.py      alignment, SSIM, recapture, ELA, copy-move, EXIF
   scoring.py        transparent weighted risk contributions
   pipeline.py       orchestration and per-check audit trail
+  templates.py      external managed template catalog and registry integration
+  template_server.py dependency-light local template web UI
   batch.py          multi-document discovery, processing, and summary reports
   audit.py          replaceable JSONL audit sink
   cli.py            command-line entry point

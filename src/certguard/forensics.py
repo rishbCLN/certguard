@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -99,10 +100,32 @@ class TemplateAnalyzer:
         gray = _as_gray(image)
         for definition in issuer.templates:
             root = self.template_root.resolve()
-            path = (root / str(definition["image"])).resolve()
+            relative = str(definition["image"])
+            path = root / relative
+            expected_digest = definition.get("sha256")
+            if expected_digest is not None and (path.is_symlink() or path.parent.is_symlink()):
+                continue
+            path = path.resolve()
             if path == root or root not in path.parents:
                 continue
-            template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if expected_digest is not None:
+                if (
+                    not isinstance(expected_digest, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+                    or relative != f"artifacts/{expected_digest}.png"
+                ):
+                    continue
+                try:
+                    artifact_bytes = path.read_bytes()
+                except OSError:
+                    continue
+                if hashlib.sha256(artifact_bytes).hexdigest() != expected_digest:
+                    continue
+                template = cv2.imdecode(
+                    np.frombuffer(artifact_bytes, dtype=np.uint8), cv2.IMREAD_GRAYSCALE
+                )
+            else:
+                template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
             if template is None:
                 continue
             candidate = self._compare(gray, template, issuer.issuer_id, definition)
@@ -159,6 +182,11 @@ class TemplateAnalyzer:
         layout = _normalized_ssim(template_edges, aligned_edges)
         scores = [value for value in (alignment, logo, font, layout) if value is not None]
         anomaly = 1 - float(np.mean(scores))
+        checks = ["feature alignment", "layout edge SSIM"]
+        if logo is not None:
+            checks.append("logo-region SSIM")
+        if font is not None:
+            checks.append("text-shape-region SSIM")
         return TemplateResult(
             available=True,
             issuer_id=issuer_id,
@@ -170,10 +198,7 @@ class TemplateAnalyzer:
             font_shape_similarity=round(font, 3) if font is not None else None,
             layout_similarity=round(layout, 3),
             anomaly_score=round(anomaly, 3),
-            explanation=(
-                "The upload was aligned with ORB/SIFT/SURF where available, then compared "
-                "by SSIM over logo, text shape, and layout."
-            ),
+            explanation=f"The upload was compared using {', '.join(checks)}.",
         )
 
     @staticmethod

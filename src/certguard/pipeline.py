@@ -28,6 +28,7 @@ from certguard.registry import IssuerRegistry
 from certguard.scoring import calculate_risk
 from certguard.search import SearchClient, discover_official_pages
 from certguard.ssdd import GrammarProfileError, GrammarStore, run_ssdd
+from certguard.templates import TemplateCatalog
 from certguard.verification import VerificationService
 
 
@@ -43,10 +44,15 @@ class CertGuardPipeline:
         forgery_model: ForgeryModel | None = None,
         grammar_root: Path | None = None,
         review_threshold: float = 55.0,
+        template_catalog: Path | None = None,
     ) -> None:
         if not 0 < review_threshold <= 100:
             raise ValueError("review_threshold must be within (0, 100]")
         self.registry = registry or IssuerRegistry.default()
+        if template_catalog is not None:
+            catalog = TemplateCatalog(template_catalog, self.registry)
+            self.registry = catalog.apply_to_registry(self.registry)
+            template_root = catalog.root
         self.verification = VerificationService(self.registry, network_enabled=network_enabled)
         self.templates = TemplateAnalyzer(template_root)
         self.provenance = ProvenanceAnalyzer(forgery_model)
